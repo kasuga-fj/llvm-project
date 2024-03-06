@@ -1552,7 +1552,8 @@ def : InstRW<[V1Write_2c_1V01], (instregex "^FAB[SD]_ZPmZ_[HSD]$",
                                            "^F(ADD|SUB)_(ZPm[IZ]|ZZZ)_[HSD]$",
                                            "^FADDP_ZPmZZ_[HSD]$",
                                            "^FNEG_ZPmZ_[HSD]$",
-                                           "^FSUBR_ZPm[IZ]_[HSD]$")>;
+                                           "^FSUBR_ZPm[IZ]_[HSD]$",
+                                           "^FSUBR_ZPZI_D_UNDEF$")>;
 
 // Floating point associative add, F16
 def : InstRW<[V1Write_19c_18V0], (instrs FADDA_VPZ_H)>;
@@ -1606,13 +1607,15 @@ def : InstRW<[V1Write_2c_1V01], (instregex "^F(MAX|MIN)(NM)?_ZPm[IZ]_[HSD]$")>;
 
 // Floating point multiply
 def : InstRW<[V1Write_3c_1V01], (instregex "^F(SCALE|MULX)_ZPmZ_[HSD]$",
-                                           "^FMUL_(ZPm[IZ]|ZZZI?)_[HSD]$")>;
+                                           "^FMUL_(ZPm[IZ]|ZZZI?)_[HSD]$",
+                                           "^FMUL_ZPZI_D_UNDEF$")>;
 
 // Floating point multiply accumulate
 // Floating point reciprocal step
 def : InstRW<[V1Write_4c_1V01], (instregex "^F(N?M(AD|SB)|N?ML[AS])_ZPmZZ_[HSD]$",
                                            "^FML[AS]_ZZZI_[HSD]$",
-                                           "^F(RECPS|RSQRTS)_ZZZ_[HSD]$")>;
+                                           "^F(RECPS|RSQRTS)_ZZZ_[HSD]$",
+                                           "^F(N?M(AD|SB)|N?ML[AS])_ZPZZZ_[SD]_(UNDEF|ZERO)$")>;
 
 // Floating point reciprocal estimate, F16
 def : InstRW<[V1Write_6c_4V0], (instrs FRECPE_ZZ_H, FRSQRTE_ZZ_H)>;
@@ -1754,7 +1757,8 @@ def : InstRW<[V1Write_9c_2L_2V],
              (instregex "^GLD(FF)?1S?[BHW]_D_IMM$",
                         "^GLD(FF)?1S?[BHW]_D(_[SU]XTW)?(_SCALED)?$",
                         "^GLD(FF)?1D_IMM$",
-                        "^GLD(FF)?1D(_[SU]XTW)?(_SCALED)?$")>;
+                        "^GLD(FF)?1D(_[SU]XTW)?(_SCALED)?$",
+                        "^GLD1D_(SCALED|IMM)$")>;
 
 // Gather load, 32-bit scaled offset
 def : InstRW<[V1Write_11c_2L_2V],
