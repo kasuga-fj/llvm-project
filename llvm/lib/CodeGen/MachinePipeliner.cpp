@@ -1652,13 +1652,9 @@ void SwingSchedulerDAG::Circuits::createAdjacencyStructure(
         }
         OutputDeps[N] = BackEdge;
       }
+
       // Do not process a boundary node, an artificial node.
       if (OE.getDst()->isBoundaryNode() || OE.isArtificial())
-        continue;
-
-      // To preserve previous behavior and prevent regression
-      // FIXME: Remove if this doesn't have significant impact on performance
-      if (OE.isAntiDep())
         continue;
 
       int N = OE.getDst()->NodeNum;
@@ -1934,18 +1930,6 @@ static bool pred_L(SetVector<SUnit *> &NodeOrder,
       if (NodeOrder.count(PredSU) == 0)
         Preds.insert(PredSU);
     }
-
-    // To preserve previous behavior and prevent regression
-    // FIXME: Remove if this doesn't have significant impact on performance
-    for (const auto &OE : DDG->getOutEdges(SU)) {
-      SUnit *SuccSU = OE.getDst();
-      if (!OE.isAntiDep())
-        continue;
-      if (S && S->count(SuccSU) == 0)
-        continue;
-      if (NodeOrder.count(SuccSU) == 0)
-        Preds.insert(SuccSU);
-    }
   }
   return !Preds.empty();
 }
@@ -1967,18 +1951,6 @@ static bool succ_L(SetVector<SUnit *> &NodeOrder,
         continue;
       if (NodeOrder.count(SuccSU) == 0)
         Succs.insert(SuccSU);
-    }
-
-    // To preserve previous behavior and prevent regression
-    // FIXME: Remove if this doesn't have significant impact on performance
-    for (const auto &IE : DDG->getInEdges(SU)) {
-      SUnit *PredSU = IE.getSrc();
-      if (!IE.isAntiDep())
-        continue;
-      if (S && S->count(PredSU) == 0)
-        continue;
-      if (NodeOrder.count(PredSU) == 0)
-        Succs.insert(PredSU);
     }
   }
   return !Succs.empty();
@@ -2350,20 +2322,6 @@ void SwingSchedulerDAG::computeNodeOrder(NodeSetType &NodeSets) {
               continue;
             R.insert(SU);
           }
-
-          // To preserve previous behavior and prevent regression
-          // FIXME: Remove if this doesn't have significant impact on
-          // performance
-          for (const auto &IE : DDG->getInEdges(maxHeight)) {
-            SUnit *SU = IE.getSrc();
-            if (!IE.isAntiDep())
-              continue;
-            if (Nodes.count(SU) == 0)
-              continue;
-            if (NodeOrder.contains(SU))
-              continue;
-            R.insert(SU);
-          }
         }
         Order = BottomUp;
         LLVM_DEBUG(dbgs() << "\n   Switching order to bottom up ");
@@ -2398,20 +2356,6 @@ void SwingSchedulerDAG::computeNodeOrder(NodeSetType &NodeSets) {
           }
           for (const auto &IE : DDG->getInEdges(maxDepth)) {
             SUnit *SU = IE.getSrc();
-            if (Nodes.count(SU) == 0)
-              continue;
-            if (NodeOrder.contains(SU))
-              continue;
-            R.insert(SU);
-          }
-
-          // To preserve previous behavior and prevent regression
-          // FIXME: Remove if this doesn't have significant impact on
-          // performance
-          for (const auto &OE : DDG->getOutEdges(maxDepth)) {
-            SUnit *SU = OE.getDst();
-            if (!OE.isAntiDep())
-              continue;
             if (Nodes.count(SU) == 0)
               continue;
             if (NodeOrder.contains(SU))
@@ -3170,12 +3114,6 @@ SmallSet<SUnit *, 8> SMSchedule::computeUnpipelineableNodes(
     DoNotPipeline.insert(SU);
     for (const auto &IE : DDG->getInEdges(SU))
       Worklist.push_back(IE.getSrc());
-
-    // To preserve previous behavior and prevent regression
-    // FIXME: Remove if this doesn't have significant impact on
-    for (const auto &OE : DDG->getOutEdges(SU))
-      if (OE.getDistance() == 1)
-        Worklist.push_back(OE.getDst());
   }
   return DoNotPipeline;
 }
@@ -3200,12 +3138,6 @@ bool SMSchedule::normalizeNonPipelinedInstructions(
     for (const auto &IE : SSD->getDDG()->getInEdges(&SU))
       if (IE.getDistance() == 0)
         NewCycle = std::max(InstrToCycle[IE.getSrc()], NewCycle);
-
-    // To preserve previous behavior and prevent regression
-    // FIXME: Remove if this doesn't have significant impact on performance
-    for (auto &OE : SSD->getDDG()->getOutEdges(&SU))
-      if (OE.getDistance() == 1)
-        NewCycle = std::max(InstrToCycle[OE.getDst()], NewCycle);
 
     int OldCycle = InstrToCycle[&SU];
     if (OldCycle != NewCycle) {
@@ -3787,13 +3719,10 @@ void ResourceManager::init(int II) {
   NumScheduledMops.resize(II);
 }
 
-bool SwingSchedulerDDGEdge::ignoreDependence(bool IgnoreAnti) const {
+bool SwingSchedulerDDGEdge::ignoreDependence(bool IgnoreLoopCarriedDep) const {
   if (Pred.isArtificial() || Dst->isBoundaryNode())
     return true;
-  // Currently, dependence that is an anti-dependences but not a loop-carried is
-  // also ignored. This behavior is preserved to prevent regression.
-  // FIXME: Remove if this doesn't have significant impact on performance
-  return IgnoreAnti && (Pred.getKind() == SDep::Kind::Anti || Distance != 0);
+  return IgnoreLoopCarriedDep && Distance != 0;
 }
 
 SwingSchedulerDDG::SwingSchedulerDDGEdges &

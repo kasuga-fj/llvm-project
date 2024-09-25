@@ -190,7 +190,7 @@ public:
   /// Returns true for DDG nodes that we ignore when computing the cost
   /// functions. We ignore the back-edge recurrence in order to avoid unbounded
   /// recursion in the calculation of the ASAP, ALAP, etc functions.
-  bool ignoreDependence(bool IgnoreAnti) const;
+  bool ignoreDependence(bool IgnoreLoopCarriedDep) const;
 };
 
 /// Represents dependencies between instructions. This class is a wrapper of
