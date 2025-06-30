@@ -221,6 +221,9 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
           Dep.push_back('I');
         }
 
+        if (all_of(Dep, [](char C) { return C == '*'; }))
+          return false;
+
         // Make sure we only add unique entries to the dependency matrix.
         if (Seen.insert(StringRef(Dep.data(), Dep.size())).second)
           DepMatrix.push_back(Dep);
