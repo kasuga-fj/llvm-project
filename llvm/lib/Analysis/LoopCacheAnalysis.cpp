@@ -211,9 +211,10 @@ IndexedReference::hasSpacialReuse(const IndexedReference &Other, unsigned CLS,
   return InSameCacheLine;
 }
 
-std::optional<bool> IndexedReference::hasTemporalReuse(
-    const IndexedReference &Other, unsigned MaxDistance, const Loop &L,
-    BatchDependenceInfo &BDI, AAResults &AA) const {
+std::optional<bool>
+IndexedReference::hasTemporalReuse(const IndexedReference &Other,
+                                   unsigned MaxDistance, const Loop &L,
+                                   DependenceInfo &DI, AAResults &AA) const {
   assert(IsValid && "Expecting a valid reference");
 
   if (BasePointer != Other.getBasePointer() && !isAliased(Other, AA)) {
@@ -222,7 +223,8 @@ std::optional<bool> IndexedReference::hasTemporalReuse(
     return false;
   }
 
-  Dependence *D = BDI.depends(&StoreOrLoadInst, &Other.StoreOrLoadInst);
+  std::unique_ptr<Dependence> D =
+      DI.depends(&StoreOrLoadInst, &Other.StoreOrLoadInst);
 
   if (D == nullptr) {
     LLVM_DEBUG(dbgs().indent(2) << "No temporal reuse: no dependence\n");
@@ -565,10 +567,10 @@ raw_ostream &llvm::operator<<(raw_ostream &OS, const CacheCost &CC) {
 
 CacheCost::CacheCost(const LoopVectorTy &Loops, const LoopInfo &LI,
                      ScalarEvolution &SE, TargetTransformInfo &TTI,
-                     AAResults &AA, BatchDependenceInfo &BDI,
+                     AAResults &AA, DependenceInfo &DI,
                      std::optional<unsigned> TRT)
     : Loops(Loops), TRT(TRT.value_or(TemporalReuseThreshold)), LI(LI), SE(SE),
-      TTI(TTI), AA(AA), BDI(BDI) {
+      TTI(TTI), AA(AA), DI(DI) {
   assert(!Loops.empty() && "Expecting a non-empty loop vector.");
 
   for (const Loop *L : Loops) {
@@ -582,7 +584,7 @@ CacheCost::CacheCost(const LoopVectorTy &Loops, const LoopInfo &LI,
 
 std::unique_ptr<CacheCost>
 CacheCost::getCacheCost(Loop &Root, LoopStandardAnalysisResults &AR,
-                        BatchDependenceInfo &BDI, std::optional<unsigned> TRT) {
+                        DependenceInfo &DI, std::optional<unsigned> TRT) {
   if (!Root.isOutermost()) {
     LLVM_DEBUG(dbgs() << "Expecting the outermost loop in a loop nest\n");
     return nullptr;
@@ -597,8 +599,7 @@ CacheCost::getCacheCost(Loop &Root, LoopStandardAnalysisResults &AR,
     return nullptr;
   }
 
-  return std::make_unique<CacheCost>(Loops, AR.LI, AR.SE, AR.TTI, AR.AA, BDI,
-                                     TRT);
+  return std::make_unique<CacheCost>(Loops, AR.LI, AR.SE, AR.TTI, AR.AA, DI, TRT);
 }
 
 void CacheCost::calculateCacheFootprint() {
@@ -659,7 +660,7 @@ bool CacheCost::populateReferenceGroups(ReferenceGroupsTy &RefGroups) const {
        // should have a cost closer to 2x the second due to the two cache
        // access per iteration from opposite ends of the array
         std::optional<bool> HasTemporalReuse =
-            R->hasTemporalReuse(Representative, *TRT, *InnerMostLoop, BDI, AA);
+            R->hasTemporalReuse(Representative, *TRT, *InnerMostLoop, DI, AA);
         std::optional<bool> HasSpacialReuse =
             R->hasSpacialReuse(Representative, CLS, AA);
 
@@ -742,9 +743,8 @@ PreservedAnalyses LoopCachePrinterPass::run(Loop &L, LoopAnalysisManager &AM,
                                             LPMUpdater &U) {
   Function *F = L.getHeader()->getParent();
   DependenceInfo DI(F, &AR.AA, &AR.SE, &AR.LI);
-  BatchDependenceInfo BDI(DI);
 
-  if (auto CC = CacheCost::getCacheCost(L, AR, BDI))
+  if (auto CC = CacheCost::getCacheCost(L, AR, DI))
     OS << *CC;
 
   return PreservedAnalyses::all();

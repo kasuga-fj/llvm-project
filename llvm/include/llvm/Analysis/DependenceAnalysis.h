@@ -1036,16 +1036,6 @@ namespace llvm {
   /// DependenceAnalysis wrapper pass.
   LLVM_ABI FunctionPass *createDependenceAnalysisWrapperPass();
 
-  class LLVM_ABI BatchDependenceInfo {
-    DependenceInfo &DI;
-    DenseMap<std::pair<Instruction *, Instruction *>,
-             std::unique_ptr<Dependence>>
-        Cache;
-
-  public:
-    BatchDependenceInfo(DependenceInfo &DI);
-    Dependence *depends(Instruction *Src, Instruction *Dst);
-  };
 } // namespace llvm
 
 #endif

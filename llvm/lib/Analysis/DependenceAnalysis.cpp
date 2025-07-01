@@ -4242,16 +4242,3 @@ const SCEV *DependenceInfo::getSplitIteration(const Dependence &Dep,
   }
   llvm_unreachable("somehow reached end of routine");
 }
-
-BatchDependenceInfo::BatchDependenceInfo(DependenceInfo &DI) : DI(DI) {}
-
-Dependence *BatchDependenceInfo::depends(Instruction *Src, Instruction *Dst) {
-  std::pair<Instruction *, Instruction *> Key(Src, Dst);
-  auto Ite = Cache.find(Key);
-  if (Ite != Cache.end())
-    return Ite->second.get();
-  std::unique_ptr<Dependence> Dep =
-      DI.depends(Src, Dst, /*UnderRuntimeAssumptions=*/false);
-  auto [NewIte, Inserted] = Cache.insert(std::make_pair(Key, std::move(Dep)));
-  return NewIte->second.get();
-}

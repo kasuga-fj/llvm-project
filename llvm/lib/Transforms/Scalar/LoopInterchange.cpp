@@ -127,7 +127,7 @@ static void printDepMatrix(CharMatrix &DepMatrix) {
 #endif
 
 static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
-                                     Loop *L, BatchDependenceInfo *BDI,
+                                     Loop *L, DependenceInfo *DI,
                                      ScalarEvolution *SE,
                                      OptimizationRemarkEmitter *ORE) {
   using ValueVector = SmallVector<Value *, 16>;
@@ -178,7 +178,7 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
       if (isa<LoadInst>(Src) && isa<LoadInst>(Dst))
         continue;
       // Track Output, Flow, and Anti dependencies.
-      if (auto D = BDI->depends(Src, Dst)) {
+      if (auto D = DI->depends(Src, Dst)) {
         assert(D->isOrdered() && "Expected an output, flow or anti dep.");
         // If the direction vector is negative, normalize it to
         // make it non-negative.
@@ -358,15 +358,15 @@ struct LoopInterchangeCacheCost {
   DenseMap<const Loop *, unsigned> CostMap;
 
   LoopInterchangeCacheCost(Loop *Outermost, LoopStandardAnalysisResults *AR,
-                           BatchDependenceInfo *BDI)
-      : Outermost(Outermost), AR(AR), BDI(BDI) {}
+                           DependenceInfo *DI)
+      : Outermost(Outermost), AR(AR), DI(DI) {}
 
   void computeIfUninitialized();
 
 private:
   Loop *Outermost = nullptr;
   LoopStandardAnalysisResults *AR = nullptr;
-  BatchDependenceInfo *BDI = nullptr;
+  DependenceInfo *DI = nullptr;
 };
 
 /// LoopInterchangeLegality checks if it is legal to interchange the loop.
@@ -491,17 +491,17 @@ private:
 struct LoopInterchange {
   ScalarEvolution *SE = nullptr;
   LoopInfo *LI = nullptr;
-  BatchDependenceInfo *BDI = nullptr;
+  DependenceInfo *DI = nullptr;
   DominatorTree *DT = nullptr;
   LoopStandardAnalysisResults *AR = nullptr;
 
   /// Interface to emit optimization remarks.
   OptimizationRemarkEmitter *ORE;
 
-  LoopInterchange(ScalarEvolution *SE, LoopInfo *LI, BatchDependenceInfo *BDI,
+  LoopInterchange(ScalarEvolution *SE, LoopInfo *LI, DependenceInfo *DI,
                   DominatorTree *DT, LoopStandardAnalysisResults *AR,
                   OptimizationRemarkEmitter *ORE)
-      : SE(SE), LI(LI), BDI(BDI), DT(DT), AR(AR), ORE(ORE) {}
+      : SE(SE), LI(LI), DI(DI), DT(DT), AR(AR), ORE(ORE) {}
 
   bool run(Loop *L) {
     if (L->getParentLoop())
@@ -540,7 +540,7 @@ struct LoopInterchange {
     CharMatrix DependencyMatrix;
     Loop *OuterMostLoop = *(LoopList.begin());
     if (!populateDependencyMatrix(DependencyMatrix, LoopNestDepth,
-                                  OuterMostLoop, BDI, SE, ORE)) {
+                                  OuterMostLoop, DI, SE, ORE)) {
       LLVM_DEBUG(dbgs() << "Populating dependency matrix failed\n");
       return false;
     }
@@ -556,7 +556,7 @@ struct LoopInterchange {
     }
 
     unsigned SelecLoopId = selectLoopForInterchange(LoopList);
-    LoopInterchangeCacheCost LICC(LoopList[0], AR, BDI);
+    LoopInterchangeCacheCost LICC(LoopList[0], AR, DI);
     // We try to achieve the globally optimal memory access for the loopnest,
     // and do interchange based on a bubble-sort fasion. We start from
     // the innermost loop, move it outwards to the best possible position
@@ -638,7 +638,7 @@ void LoopInterchangeCacheCost::computeIfUninitialized() {
   // indicates the loop should be placed as the innermost loop.
   //
   // For the old pass manager CacheCost would be null.
-  CC = CacheCost::getCacheCost(*Outermost, *AR, *BDI);
+  CC = CacheCost::getCacheCost(*Outermost, *AR, *DI);
   if (CC)
     for (const auto &[Idx, Cost] : enumerate(CC->getLoopCosts()))
       CostMap[Cost.first] = Idx;
@@ -1863,8 +1863,7 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
   });
 
   DependenceInfo DI(&F, &AR.AA, &AR.SE, &AR.LI);
-  BatchDependenceInfo BDI(DI);
-  if (!LoopInterchange(&AR.SE, &AR.LI, &BDI, &AR.DT, &AR, &ORE).run(LN))
+  if (!LoopInterchange(&AR.SE, &AR.LI, &DI, &AR.DT, &AR, &ORE).run(LN))
     return PreservedAnalyses::all();
   U.markLoopNestChanged(true);
   return getLoopPassPreservedAnalyses();
