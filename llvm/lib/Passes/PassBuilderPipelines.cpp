@@ -201,7 +201,7 @@ static cl::opt<bool> RunNewGVN("enable-newgvn", cl::init(false), cl::Hidden,
                                cl::desc("Run the NewGVN pass"));
 
 static cl::opt<bool>
-    EnableLoopInterchange("enable-loopinterchange", cl::init(false), cl::Hidden,
+    EnableLoopInterchange("enable-loopinterchange", cl::init(true), cl::Hidden,
                           cl::desc("Enable the LoopInterchange Pass"));
 
 static cl::opt<bool> EnableUnrollAndJam("enable-unroll-and-jam",
@@ -690,7 +690,7 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
 
   LPM2.addPass(LoopDeletionPass());
 
-  if (PTO.LoopInterchange)
+  if (PTO.LoopInterchange || EnableLoopInterchange)
     LPM2.addPass(LoopInterchangePass());
 
   // Do not enable unrolling in PreLinkThinLTO phase during sample PGO
