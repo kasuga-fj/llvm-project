@@ -143,29 +143,31 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
       if (auto *Ld = dyn_cast<LoadInst>(&I)) {
         if (!Ld->isSimple())
           return false;
-        MemInstr.push_back(&I);
       } else if (auto *St = dyn_cast<StoreInst>(&I)) {
         if (!St->isSimple())
           return false;
-        MemInstr.push_back(&I);
+      } else {
+        continue;
+      }
+
+      MemInstr.push_back(&I);
+      if (MemInstr.size() > MaxMemInstrCount) {
+        LLVM_DEBUG(dbgs() << "The transform doesn't support more than "
+                          << MaxMemInstrCount << " load/stores in a loop\n");
+        ORE->emit([&]() {
+          return OptimizationRemarkMissed(DEBUG_TYPE, "UnsupportedLoop",
+                                          L->getStartLoc(), L->getHeader())
+                 << "Number of loads/stores exceeded, the supported maximum "
+                    "can be increased with option "
+                    "-loop-interchange-maxmeminstr-count.";
+        });
+        return false;
       }
     }
   }
 
   LLVM_DEBUG(dbgs() << "Found " << MemInstr.size()
                     << " Loads and Stores to analyze\n");
-  if (MemInstr.size() > MaxMemInstrCount) {
-    LLVM_DEBUG(dbgs() << "The transform doesn't support more than "
-                      << MaxMemInstrCount << " load/stores in a loop\n");
-    ORE->emit([&]() {
-      return OptimizationRemarkMissed(DEBUG_TYPE, "UnsupportedLoop",
-                                      L->getStartLoc(), L->getHeader())
-             << "Number of loads/stores exceeded, the supported maximum "
-                "can be increased with option "
-                "-loop-interchange-maxmeminstr-count.";
-    });
-    return false;
-  }
   ValueVector::iterator I, IE, J, JE;
   StringSet<> Seen;
 
