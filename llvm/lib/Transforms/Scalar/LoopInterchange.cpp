@@ -1057,6 +1057,20 @@ bool LoopInterchangeLegality::canInterchangeLoops(unsigned InnerLoopId,
     });
     return false;
   }
+
+  // Check if the loops are tightly nested.
+  if (!tightlyNested(OuterLoop, InnerLoop)) {
+    LLVM_DEBUG(dbgs() << "Loops not tightly nested\n");
+    ORE->emit([&]() {
+      return OptimizationRemarkMissed(DEBUG_TYPE, "NotTightlyNested",
+                                      InnerLoop->getStartLoc(),
+                                      InnerLoop->getHeader())
+             << "Cannot interchange loops because they are not tightly "
+                "nested.";
+    });
+    return false;
+  }
+
   // Check if outer and inner loop contain legal instructions only.
   for (auto *BB : OuterLoop->blocks())
     for (Instruction &I : BB->instructionsWithoutDebug())
@@ -1098,19 +1112,6 @@ bool LoopInterchangeLegality::canInterchangeLoops(unsigned InnerLoopId,
   // transform module.
   if (currentLimitations()) {
     LLVM_DEBUG(dbgs() << "Not legal because of current transform limitation\n");
-    return false;
-  }
-
-  // Check if the loops are tightly nested.
-  if (!tightlyNested(OuterLoop, InnerLoop)) {
-    LLVM_DEBUG(dbgs() << "Loops not tightly nested\n");
-    ORE->emit([&]() {
-      return OptimizationRemarkMissed(DEBUG_TYPE, "NotTightlyNested",
-                                      InnerLoop->getStartLoc(),
-                                      InnerLoop->getHeader())
-             << "Cannot interchange loops because they are not tightly "
-                "nested.";
-    });
     return false;
   }
 
