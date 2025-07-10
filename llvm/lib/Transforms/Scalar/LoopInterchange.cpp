@@ -334,17 +334,19 @@ static bool hasSupportedLoopDepth(ArrayRef<Loop *> LoopList,
 static bool isComputableLoopNest(ScalarEvolution *SE,
                                  ArrayRef<Loop *> LoopList) {
   for (Loop *L : LoopList) {
-    const SCEV *ExitCountOuter = SE->getBackedgeTakenCount(L);
-    if (isa<SCEVCouldNotCompute>(ExitCountOuter)) {
-      LLVM_DEBUG(dbgs() << "Couldn't compute backedge count\n");
-      return false;
-    }
     if (L->getNumBackEdges() != 1) {
       LLVM_DEBUG(dbgs() << "NumBackEdges is not equal to 1\n");
       return false;
     }
     if (!L->getExitingBlock()) {
       LLVM_DEBUG(dbgs() << "Loop doesn't have unique exit block\n");
+      return false;
+    }
+  }
+  for (Loop *L : LoopList) {
+    const SCEV *ExitCountOuter = SE->getBackedgeTakenCount(L);
+    if (isa<SCEVCouldNotCompute>(ExitCountOuter)) {
+      LLVM_DEBUG(dbgs() << "Couldn't compute backedge count\n");
       return false;
     }
   }
