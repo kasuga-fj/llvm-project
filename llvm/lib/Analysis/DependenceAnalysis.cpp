@@ -3446,6 +3446,87 @@ bool DependenceInfo::tryDelinearizeFixedSize(
   return true;
 }
 
+bool DependenceInfo::isAddRecMonotonic(const SCEV *Expr, const Loop *Top) {
+  const SCEVAddRecExpr *AddRec = dyn_cast<SCEVAddRecExpr>(Expr);
+  if (!AddRec)
+    return isLoopInvariant(Expr, Top);
+
+  if (!AddRec->isAffine())
+    return false;
+  const SCEV *Step = AddRec->getStepRecurrence(*SE);
+  if (!SE->isLoopInvariant(Step, Top))
+    return false;
+
+  // TODO: What happens if Step is zero?
+  if (!SE->isKnownNonZero(Step))
+    return false;
+
+  if (!AddRec->hasNoSignedWrap()) {
+    const auto *SType = dyn_cast<IntegerType>(AddRec->getType());
+    if (!SType)
+      return false;
+
+    if (!SE->isKnownNegative(Step)) {
+      const SCEV *SMax =
+          SE->getConstant(APInt::getSignedMaxValue(SType->getBitWidth()));
+      if (!SE->isKnownOnEveryIteration(CmpInst::ICMP_SLE, AddRec, SMax))
+        return false;
+    }
+    if (!SE->isKnownPositive(Step)) {
+      const SCEV *SMin =
+          SE->getConstant(APInt::getSignedMinValue(SType->getBitWidth()));
+      if (!SE->isKnownOnEveryIteration(CmpInst::ICMP_SGE, AddRec, SMin))
+        return false;
+    }
+  }
+
+  return isAddRecMonotonic(AddRec->getStart(), Top);
+}
+
+static std::pair<const SCEV *, const SCEV *> getMinAndMax(ScalarEvolution *SE,
+                                                          const SCEV *S) {
+  const SCEVAddRecExpr *AddRec = dyn_cast<SCEVAddRecExpr>(S);
+  if (!AddRec)
+    return std::make_pair(S, S);
+
+  assert(AddRec->isAffine() && "Unexpected SCEV");
+  auto [RecMin, RecMax] = getMinAndMax(SE, AddRec->getStart());
+
+  const SCEV *BTC = SE->getBackedgeTakenCount(AddRec->getLoop());
+  const SCEV *Step = AddRec->getStepRecurrence(*SE);
+  const SCEV *First = AddRec->getStart();
+  const SCEV *Last = AddRec->evaluateAtIteration(BTC, *SE);
+
+  const SCEV *Min = nullptr;
+  const SCEV *Max = nullptr;
+  if (SE->isKnownPositive(Step)) {
+    Min = First;
+    Max = Last;
+  } else if (SE->isKnownNegative(Step)) {
+    Min = Last;
+    Max = First;
+  } else {
+    Min = SE->getSMinExpr(First, Last);
+    Max = SE->getSMaxExpr(First, Last);
+  }
+
+  return std::make_pair(SE->getAddExpr(RecMin, Min),
+                        SE->getAddExpr(RecMax, Max));
+}
+
+void DependenceInfo::collectLoops(const SCEV *S, SmallBitVector &Loops,
+                                  bool IsSrc) {
+  const SCEVAddRecExpr *AddRec = dyn_cast<SCEVAddRecExpr>(S);
+  if (!AddRec)
+    return;
+
+  assert(AddRec->isAffine() && "Expected affine SCEVAddRecExpr");
+  const Loop *L = AddRec->getLoop();
+  unsigned Idx = IsSrc ? mapSrcLoop(L) : mapDstLoop(L);
+  Loops.set(Idx);
+  collectLoops(AddRec->getStart(), Loops, IsSrc);
+}
+
 bool DependenceInfo::tryDelinearizeParametricSize(
     Instruction *Src, Instruction *Dst, const SCEV *SrcAccessFn,
     const SCEV *DstAccessFn, SmallVectorImpl<const SCEV *> &SrcSubscripts,
@@ -3498,20 +3579,111 @@ bool DependenceInfo::tryDelinearizeParametricSize(
   // and dst.
   // FIXME: It may be better to record these sizes and add them as constraints
   // to the dependency checks.
-  if (!DisableDelinearizationChecks)
-    for (size_t I = 1; I < Size; ++I) {
-      if (!isKnownNonNegative(SrcSubscripts[I], SrcPtr))
+  if (!DisableDelinearizationChecks) {
+    // First, check that the all elements of Sizes are "non-negative". In this
+    // context, the term "non-negative" is used to denote that the value is
+    // less than 2^(N-1) in unsigned interpretation, where N is the bit width
+    // of the pointer index type. If we cannot prove that, discard the
+    // delinearization result.
+    const DataLayout &DL = F->getDataLayout();
+    IntegerType *IntIdxTy =
+        dyn_cast<IntegerType>(DL.getIndexType(SrcPtr->getType()));
+    if (!IntIdxTy)
+      return false;
+    const SCEV *SMaxIdx =
+        SE->getConstant(APInt::getSignedMaxValue(IntIdxTy->getBitWidth()));
+    for (const SCEV *&Size : Sizes) {
+      IntegerType *SizeTy = dyn_cast<IntegerType>(Size->getType());
+      if (!SizeTy)
         return false;
 
-      if (!isKnownLessThan(SrcSubscripts[I], Sizes[I - 1]))
+      if (SizeTy->getBitWidth() < IntIdxTy->getBitWidth()) {
+        Size = SE->getZeroExtendExpr(Size, IntIdxTy);
+        continue;
+      }
+
+      const SCEV *UB = SMaxIdx;
+      bool Ext = SizeTy->getBitWidth() > IntIdxTy->getBitWidth();
+      if (Ext)
+        UB = SE->getZeroExtendExpr(UB, SizeTy);
+      if (!SE->isKnownPredicate(CmpInst::ICMP_SLE, Size, UB))
         return false;
 
-      if (!isKnownNonNegative(DstSubscripts[I], DstPtr))
-        return false;
-
-      if (!isKnownLessThan(DstSubscripts[I], Sizes[I - 1]))
-        return false;
+      if (Ext)
+        Size = SE->getTruncateExpr(Size, IntIdxTy);
     }
+
+    return false;
+
+    // At this point, we know that the all elements of Sizes are non-negative.
+
+    auto CheckSubscripts = [&](bool IsSrc) {
+      const SCEVAddRecExpr *Offset = IsSrc ? SrcAR : DstAR;
+      const Loop *L = Offset->getLoop();
+      ArrayRef<const SCEV *> Subscripts = IsSrc ? SrcSubscripts : DstSubscripts;
+
+      // First, ensure that the original AddRec is monotonic.
+      // TODO: Maybe we can infer some useful information from the GEP flags.
+      if (!isAddRecMonotonic(Offset, L))
+        return false;
+
+      // Check that all subscripts are monotonic as well. Also ensure
+      // that the type of them are the same as pointer index type.
+      for (const SCEV *Subscript : Subscripts) {
+        if (!isAddRecMonotonic(Subscript, L))
+          return false;
+        IntegerType *SType = dyn_cast<IntegerType>(Subscript->getType());
+        // TODO: If SType->getBitWidth() < IntIdxTy->getBitWidth(), maybe it's
+        // safe to insert cast instrutions recursively to Subscript after
+        // proving its monotonicity?
+        if (!SType || SType->getBitWidth() != IntIdxTy->getBitWidth())
+          return false;
+      }
+
+      // Perform boundary checks. For each Subscript, check that the following
+      // condition holds:
+      //
+      //   0 <= Subscript < Size
+      //
+      // As we already ensured that Size is non-negative, it's safe to use SLT
+      // here. Note that the first subscript (i.e., Subscripts[0]) is allowed
+      // to be negative.
+      for (size_t I = 1; I < Size; I++) {
+        auto [Min, Max] = getMinAndMax(SE, Subscripts[I]);
+        if (!SE->isKnownNonNegative(Min))
+          return false;
+        if (!SE->isKnownPredicate(CmpInst::ICMP_SLT, Max, Sizes[I - 1]))
+          return false;
+      }
+
+      // Dependency analysis relies on the following fact:
+      //
+      // - Arr[x_0][x_1]..[x_n] and Arr[y_0][y_1]..[y_n] point to the same
+      //   location iff x_i = y_i for all i in [0, n].
+      //
+      // Let offset_i = x_i * Sizes[i+1] * Sizes[i+2] * ... * Sizes[n]. To
+      // guarantee the above, "each subscript doesn't wrap" is insufficient. We
+      // must check the following as well:
+      //
+      // - The multiplication in offset_i doesn't wrap.
+      // - offset_0 + offset_1 + ... + offset_n doesn't wrap.
+      //
+      // TODO: How to prove them????
+      // One idea: As looking at existing test cases, the following seems to be
+      // a typical case:
+      //
+      // for (int i = 0; i < n; i++)
+      //   for (int j = 0; j < m; j++)
+      //     for (int k = 0; k < o; k++)
+      //       A[i*m*o + j*o + k] = ...;
+      //
+
+      return false;
+    };
+
+    if (!CheckSubscripts(true) || !CheckSubscripts(false))
+      return false;
+  }
 
   return true;
 }
