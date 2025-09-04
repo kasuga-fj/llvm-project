@@ -709,3 +709,98 @@ for.inc5:                                         ; preds = %for.body3
 for.end7:                                         ; preds = %for.inc5
   ret void
 }
+
+;; The if-statement `if (i < 100)` is intended to ensure that none of the GEPs
+;; result in a poison value.
+;; FIXME: There is a loop-carried dependency between the two stores.
+;;
+;; tc = 1 << 60
+;; for (int64_t i = 0; i < tc; i++)
+;;   if (i < 100) {
+;;     A[i*20 - tc + 0] = 0;
+;;     A[i*10 - tc + 10] = 1;
+;;   }
+
+define void @rdiv13(ptr %A) {
+; CHECK-LABEL: 'rdiv13'
+; CHECK-NEXT:  Src: store i8 0, ptr %idx.0, align 1 --> Dst: store i8 0, ptr %idx.0, align 1
+; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:  Src: store i8 0, ptr %idx.0, align 1 --> Dst: store i8 1, ptr %idx.1, align 1
+; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:  Src: store i8 1, ptr %idx.1, align 1 --> Dst: store i8 1, ptr %idx.1, align 1
+; CHECK-NEXT:    da analyze - none!
+;
+entry:
+  br label %loop.header
+
+loop.header:
+  %i = phi i64 [ 0, %entry ], [ %i.inc, %loop.latch ]
+  %cond.store = icmp slt i64 %i, 100
+  br i1 %cond.store, label %if.store, label %loop.latch
+
+if.store:
+  %i.10 = mul nuw nsw i64 %i, 10
+  %i.20 = mul nuw nsw i64 %i, 20
+  %subscript.0 = add nsw i64 %i.20, -1152921504606846976
+  %subscript.1 = add nsw i64 %i.10, -1152921504606846966
+  %idx.0 = getelementptr inbounds i8, ptr %A, i64 %subscript.0
+  %idx.1 = getelementptr inbounds i8, ptr %A, i64 %subscript.1
+  store i8 0, ptr %idx.0
+  store i8 1, ptr %idx.1
+  br label %loop.latch
+
+loop.latch:
+  %i.inc = add nuw nsw i64 %i, 1
+  %exitcond = icmp eq i64 %i.inc, 1152921504606846976
+  br i1 %exitcond, label %exit, label %loop.header
+
+exit:
+  ret void
+}
+
+;; The if-statement `if (i < 100)` is intended to ensure that none of the GEPs
+;; result in a poison value.
+;;
+;; for (int64_t i = 0; i < n; i++)
+;;   if (i < 100) {
+;;     A[i*20 - n + 0] = 0;
+;;     A[i*10 - n + 10] = 1;
+;;   }
+
+define void @rdiv14(ptr %A, i64 %n) {
+; CHECK-LABEL: 'rdiv14'
+; CHECK-NEXT:  Src: store i8 0, ptr %idx.0, align 1 --> Dst: store i8 0, ptr %idx.0, align 1
+; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:  Src: store i8 0, ptr %idx.0, align 1 --> Dst: store i8 1, ptr %idx.1, align 1
+; CHECK-NEXT:    da analyze - output [*|<]!
+; CHECK-NEXT:  Src: store i8 1, ptr %idx.1, align 1 --> Dst: store i8 1, ptr %idx.1, align 1
+; CHECK-NEXT:    da analyze - none!
+;
+entry:
+  br label %loop.header
+
+loop.header:
+  %i = phi i64 [ 0, %entry ], [ %i.inc, %loop.latch ]
+  %cond.store = icmp slt i64 %i, 100
+  br i1 %cond.store, label %if.store, label %loop.latch
+
+if.store:
+  %i.10 = mul nuw nsw i64 %i, 10
+  %i.20 = mul nuw nsw i64 %i, 20
+  %subscript.0 = sub nsw i64 %i.20, %n
+  %subscript.1.tmp = sub nsw i64 %i.10, %n
+  %subscript.1 = add nsw i64 %subscript.1.tmp, 10
+  %idx.0 = getelementptr inbounds i8, ptr %A, i64 %subscript.0
+  %idx.1 = getelementptr inbounds i8, ptr %A, i64 %subscript.1
+  store i8 0, ptr %idx.0
+  store i8 1, ptr %idx.1
+  br label %loop.latch
+
+loop.latch:
+  %i.inc = add nuw nsw i64 %i, 1
+  %exitcond = icmp eq i64 %i.inc, %n
+  br i1 %exitcond, label %exit, label %loop.header
+
+exit:
+  ret void
+}
