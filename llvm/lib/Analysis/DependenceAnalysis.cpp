@@ -2135,90 +2135,78 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
   const SCEV *N2 = collectUpperBound(Loop2, A1->getType());
   LLVM_DEBUG(if (N1) dbgs() << "\t    N1 = " << *N1 << "\n");
   LLVM_DEBUG(if (N2) dbgs() << "\t    N2 = " << *N2 << "\n");
+
   const SCEV *C2_C1 = SE->getMinusSCEV(C2, C1);
-  const SCEV *C1_C2 = SE->getMinusSCEV(C1, C2);
   LLVM_DEBUG(dbgs() << "\t    C2 - C1 = " << *C2_C1 << "\n");
-  LLVM_DEBUG(dbgs() << "\t    C1 - C2 = " << *C1_C2 << "\n");
+
+  const SCEV *Min = nullptr;
+  const SCEV *Max = nullptr;
+
+  // Calcuate the min/max values for a1*i - a2*j
   if (SE->isKnownNonNegative(A1)) {
     if (SE->isKnownNonNegative(A2)) {
-      // A1 >= 0 && A2 >= 0
+      // a1 >= 0 && a2 >= 0
+      // Dependency can exist only if -a2*N2 <= c2 - c1 <= a1*N1
       if (N1) {
-        // make sure that c2 - c1 <= a1*N1
-        const SCEV *A1N1 = SE->getMulExpr(A1, N1);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 = " << *A1N1 << "\n");
-        if (isKnownPredicate(CmpInst::ICMP_SGT, C2_C1, A1N1)) {
-          ++SymbolicRDIVindependence;
-          return true;
-        }
+        Max = SE->getMulExpr(A1, N1);
+        LLVM_DEBUG(dbgs() << "\t    A1*N1 = " << *Max << "\n");
       }
       if (N2) {
-        // make sure that -a2*N2 <= c2 - c1, or a2*N2 >= c1 - c2
-        const SCEV *A2N2 = SE->getMulExpr(A2, N2);
-        LLVM_DEBUG(dbgs() << "\t    A2*N2 = " << *A2N2 << "\n");
-        if (isKnownPredicate(CmpInst::ICMP_SLT, A2N2, C1_C2)) {
-          ++SymbolicRDIVindependence;
-          return true;
-        }
+        Min = SE->getNegativeSCEV(SE->getMulExpr(A2, N2));
+        LLVM_DEBUG(dbgs() << "\t   -A2*N2 = " << *Min << "\n");
       }
     } else if (SE->isKnownNonPositive(A2)) {
       // a1 >= 0 && a2 <= 0
+      // Dependency can exist only if 0 <= c2 - c1 <= a1*N1 - a2*N2
+      Min = SE->getZero(A1->getType());
       if (N1 && N2) {
-        // make sure that c2 - c1 <= a1*N1 - a2*N2
         const SCEV *A1N1 = SE->getMulExpr(A1, N1);
         const SCEV *A2N2 = SE->getMulExpr(A2, N2);
-        const SCEV *A1N1_A2N2 = SE->getMinusSCEV(A1N1, A2N2);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 - A2*N2 = " << *A1N1_A2N2 << "\n");
-        if (isKnownPredicate(CmpInst::ICMP_SGT, C2_C1, A1N1_A2N2)) {
-          ++SymbolicRDIVindependence;
-          return true;
-        }
-      }
-      // make sure that 0 <= c2 - c1
-      if (SE->isKnownNegative(C2_C1)) {
-        ++SymbolicRDIVindependence;
-        return true;
+        Max = SE->getMinusSCEV(A1N1, A2N2);
+        LLVM_DEBUG(dbgs() << "\t    A1*N1 - A2*N2 = " << *Max << "\n");
       }
     }
   } else if (SE->isKnownNonPositive(A1)) {
     if (SE->isKnownNonNegative(A2)) {
       // a1 <= 0 && a2 >= 0
+      // Dependency can exist only if a1*N1 - a2*N2 <= c2 - c1 <= 0
       if (N1 && N2) {
-        // make sure that a1*N1 - a2*N2 <= c2 - c1
         const SCEV *A1N1 = SE->getMulExpr(A1, N1);
         const SCEV *A2N2 = SE->getMulExpr(A2, N2);
-        const SCEV *A1N1_A2N2 = SE->getMinusSCEV(A1N1, A2N2);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 - A2*N2 = " << *A1N1_A2N2 << "\n");
-        if (isKnownPredicate(CmpInst::ICMP_SGT, A1N1_A2N2, C2_C1)) {
-          ++SymbolicRDIVindependence;
-          return true;
-        }
+        Min = SE->getMinusSCEV(A1N1, A2N2);
+        LLVM_DEBUG(dbgs() << "\t    A1*N1 - A2*N2 = " << *Min << "\n");
       }
-      // make sure that c2 - c1 <= 0
-      if (SE->isKnownPositive(C2_C1)) {
-        ++SymbolicRDIVindependence;
-        return true;
-      }
+      Max = SE->getZero(A1->getType());
     } else if (SE->isKnownNonPositive(A2)) {
       // a1 <= 0 && a2 <= 0
+      // Dependency can exist only if a1*N1 <= c2 - c1 <= -a2*N2
       if (N1) {
-        // make sure that a1*N1 <= c2 - c1
-        const SCEV *A1N1 = SE->getMulExpr(A1, N1);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 = " << *A1N1 << "\n");
-        if (isKnownPredicate(CmpInst::ICMP_SGT, A1N1, C2_C1)) {
-          ++SymbolicRDIVindependence;
-          return true;
-        }
+        Min = SE->getMulExpr(A1, N1);
+        LLVM_DEBUG(dbgs() << "\t    A1*N1 = " << *Min << "\n");
       }
       if (N2) {
-        // make sure that c2 - c1 <= -a2*N2, or c1 - c2 >= a2*N2
-        const SCEV *A2N2 = SE->getMulExpr(A2, N2);
-        LLVM_DEBUG(dbgs() << "\t    A2*N2 = " << *A2N2 << "\n");
-        if (isKnownPredicate(CmpInst::ICMP_SLT, C1_C2, A2N2)) {
-          ++SymbolicRDIVindependence;
-          return true;
-        }
+        Max = SE->getNegativeSCEV(SE->getMulExpr(A2, N2));
+        LLVM_DEBUG(dbgs() << "\t   -A2*N2 = " << *Max << "\n");
       }
     }
+  }
+
+  // Dependence can exist only if:
+  //
+  //   Min <= c2 - c1 <= Max
+  //
+  // The negation of this is:
+  //
+  //   c2 - c1 < Min or c2 - c1 > Max
+  //
+  // If we can prove either of these, then we know there's no dependence.
+  if (Min && isKnownPredicate(CmpInst::ICMP_SLT, C2_C1, Min)) {
+    ++SymbolicRDIVindependence;
+    return true;
+  }
+  if (Max && isKnownPredicate(CmpInst::ICMP_SGT, C2_C1, Max)) {
+    ++SymbolicRDIVindependence;
+    return true;
   }
   return false;
 }
