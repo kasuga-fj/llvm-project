@@ -609,3 +609,46 @@ for.body:                                         ; preds = %entry, %for.body
 for.end:                                          ; preds = %for.body
   ret void
 }
+
+;; for (long long i = 0; i < INT64_MAX / 2; i++) {
+;;   A[-i + INT64_MAX] = 0;
+;;   if (i)
+;;     A[2*i - 1] = 1;
+;; }
+
+define void @exact14(ptr %A) {
+; CHECK-LABEL: 'exact14'
+; CHECK-NEXT:  Src: store i8 0, ptr %idx.0, align 1 --> Dst: store i8 0, ptr %idx.0, align 1
+; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:  Src: store i8 0, ptr %idx.0, align 1 --> Dst: store i8 1, ptr %idx.1, align 1
+; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:  Src: store i8 1, ptr %idx.1, align 1 --> Dst: store i8 1, ptr %idx.1, align 1
+; CHECK-NEXT:    da analyze - none!
+;
+entry:
+  br label %loop.header
+
+loop.header:
+  %i = phi i64 [ 0, %entry ], [ %i.inc, %loop.latch ]
+  %subscript.0 = phi i64 [ 9223372036854775807, %entry ], [ %subscript.0.next, %loop.latch ]
+  %subscript.1 = phi i64 [ -1, %entry ], [ %subscript.1.next, %loop.latch ]
+  %idx.0 = getelementptr inbounds i8, ptr %A, i64 %subscript.0
+  store i8 0, ptr %idx.0
+  %cond.store = icmp ne i64 %i, 0
+  br i1 %cond.store, label %if.store, label %loop.latch
+
+if.store:
+  %idx.1 = getelementptr inbounds i8, ptr %A, i64 %subscript.1
+  store i8 1, ptr %idx.1
+  br label %loop.latch
+
+loop.latch:
+  %i.inc = add nuw nsw i64 %i, 1
+  %subscript.0.next = add nuw nsw i64 %subscript.0, -1
+  %subscript.1.next = add nuw nsw i64 %subscript.1, 2
+  %exitcond = icmp eq i64 %i.inc, 4611686018427387904
+  br i1 %exitcond, label %exit, label %loop.header
+
+exit:
+  ret void
+}
