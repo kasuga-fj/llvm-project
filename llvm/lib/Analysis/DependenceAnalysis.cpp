@@ -1164,6 +1164,23 @@ const SCEVConstant *DependenceInfo::collectConstantUpperBound(const Loop *L,
   return nullptr;
 }
 
+static const SCEV *minusSCEVNoSignedOverflow(const SCEV *A, const SCEV *B,
+                                             ScalarEvolution &SE) {
+  if (SE.willNotOverflow(Instruction::Sub, /*Signed=*/true, A, B))
+    return SE.getMinusSCEV(A, B);
+  LLVM_DEBUG(dbgs() << "    can't prove no signed overflow on "
+                       "subtraction: "
+                    << *A << " - " << *B << "\n");
+  return nullptr;
+}
+
+static const SCEV *mulSCEVNoSignedOverflow(const SCEV *A, const SCEV *B,
+                                           ScalarEvolution &SE) {
+  if (SE.willNotOverflow(Instruction::Mul, /*Signed=*/true, A, B))
+    return SE.getMulExpr(A, B);
+  return nullptr;
+}
+
 // testZIV -
 // When we have a pair of subscripts of the form [c1] and [c2],
 // where c1 and c2 are both loop invariant, we attack it using
@@ -2136,7 +2153,9 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
   LLVM_DEBUG(if (N1) dbgs() << "\t    N1 = " << *N1 << "\n");
   LLVM_DEBUG(if (N2) dbgs() << "\t    N2 = " << *N2 << "\n");
 
-  const SCEV *C2_C1 = SE->getMinusSCEV(C2, C1);
+  const SCEV *C2_C1 = minusSCEVNoSignedOverflow(C2, C1, *SE);
+  if (!C2_C1)
+    return false;
   LLVM_DEBUG(dbgs() << "\t    C2 - C1 = " << *C2_C1 << "\n");
 
   const SCEV *Min = nullptr;
@@ -2148,22 +2167,27 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
       // a1 >= 0 && a2 >= 0
       // Dependency can exist only if -a2*N2 <= c2 - c1 <= a1*N1
       if (N1) {
-        Max = SE->getMulExpr(A1, N1);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 = " << *Max << "\n");
+        Max = mulSCEVNoSignedOverflow(A1, N1, *SE);
+        LLVM_DEBUG(if (Max) dbgs() << "\t    A1*N1 = " << *Max << "\n");
       }
       if (N2) {
-        Min = SE->getNegativeSCEV(SE->getMulExpr(A2, N2));
-        LLVM_DEBUG(dbgs() << "\t   -A2*N2 = " << *Min << "\n");
+        Min = mulSCEVNoSignedOverflow(A2, N2, *SE);
+        if (Min)
+          // TODO: What happens if Min is the "most negative" signed number
+          // (e.g. -128 for 8 bit integer)?
+          Min = SE->getNegativeSCEV(Min);
+        LLVM_DEBUG(if (Min) dbgs() << "\t   -A2*N2 = " << *Min << "\n");
       }
     } else if (SE->isKnownNonPositive(A2)) {
       // a1 >= 0 && a2 <= 0
       // Dependency can exist only if 0 <= c2 - c1 <= a1*N1 - a2*N2
       Min = SE->getZero(A1->getType());
       if (N1 && N2) {
-        const SCEV *A1N1 = SE->getMulExpr(A1, N1);
-        const SCEV *A2N2 = SE->getMulExpr(A2, N2);
-        Max = SE->getMinusSCEV(A1N1, A2N2);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 - A2*N2 = " << *Max << "\n");
+        const SCEV *A1N1 = mulSCEVNoSignedOverflow(A1, N1, *SE);
+        const SCEV *A2N2 = mulSCEVNoSignedOverflow(A2, N2, *SE);
+        if (A1N1 && A2N2)
+          Max = minusSCEVNoSignedOverflow(A1N1, A2N2, *SE);
+        LLVM_DEBUG(if (Max) dbgs() << "\t    A1*N1 - A2*N2 = " << *Max << "\n");
       }
     }
   } else if (SE->isKnownNonPositive(A1)) {
@@ -2171,22 +2195,27 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
       // a1 <= 0 && a2 >= 0
       // Dependency can exist only if a1*N1 - a2*N2 <= c2 - c1 <= 0
       if (N1 && N2) {
-        const SCEV *A1N1 = SE->getMulExpr(A1, N1);
-        const SCEV *A2N2 = SE->getMulExpr(A2, N2);
-        Min = SE->getMinusSCEV(A1N1, A2N2);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 - A2*N2 = " << *Min << "\n");
+        const SCEV *A1N1 = mulSCEVNoSignedOverflow(A1, N1, *SE);
+        const SCEV *A2N2 = mulSCEVNoSignedOverflow(A2, N2, *SE);
+        if (A1N1 && A2N2)
+          Min = minusSCEVNoSignedOverflow(A1N1, A2N2, *SE);
+        LLVM_DEBUG(if (Min) dbgs() << "\t    A1*N1 - A2*N2 = " << *Min << "\n");
       }
       Max = SE->getZero(A1->getType());
     } else if (SE->isKnownNonPositive(A2)) {
       // a1 <= 0 && a2 <= 0
       // Dependency can exist only if a1*N1 <= c2 - c1 <= -a2*N2
       if (N1) {
-        Min = SE->getMulExpr(A1, N1);
-        LLVM_DEBUG(dbgs() << "\t    A1*N1 = " << *Min << "\n");
+        Min = mulSCEVNoSignedOverflow(A1, N1, *SE);
+        LLVM_DEBUG(if (Min) dbgs() << "\t    A1*N1 = " << *Min << "\n");
       }
       if (N2) {
-        Max = SE->getNegativeSCEV(SE->getMulExpr(A2, N2));
-        LLVM_DEBUG(dbgs() << "\t   -A2*N2 = " << *Max << "\n");
+        Max = mulSCEVNoSignedOverflow(A2, N2, *SE);
+        if (Max)
+          // TODO: What happens if Max is the "most negative" signed number
+          // (e.g. -128 for 8 bit integer)?
+          Max = SE->getNegativeSCEV(Max);
+        LLVM_DEBUG(if (Max) dbgs() << "\t   -A2*N2 = " << *Max << "\n");
       }
     }
   }
@@ -2200,11 +2229,11 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
   //   c2 - c1 < Min or c2 - c1 > Max
   //
   // If we can prove either of these, then we know there's no dependence.
-  if (Min && isKnownPredicate(CmpInst::ICMP_SLT, C2_C1, Min)) {
+  if (Min && SE->isKnownPredicate(CmpInst::ICMP_SLT, C2_C1, Min)) {
     ++SymbolicRDIVindependence;
     return true;
   }
-  if (Max && isKnownPredicate(CmpInst::ICMP_SGT, C2_C1, Max)) {
+  if (Max && SE->isKnownPredicate(CmpInst::ICMP_SGT, C2_C1, Max)) {
     ++SymbolicRDIVindependence;
     return true;
   }
