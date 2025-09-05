@@ -2119,7 +2119,7 @@ bool DependenceInfo::exactRDIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
 //        a1*N1 - a2*0  <= c2 - c1 <= a1*0 - a2*N2
 //        a1*N1         <= c2 - c1 <=       -a2*N2
 //
-// return true if dependence disproved
+// return true if dependence disproved.
 bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
                                       const SCEV *C1, const SCEV *C2,
                                       const Loop *Loop1,
