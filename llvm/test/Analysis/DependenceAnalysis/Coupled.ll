@@ -728,7 +728,7 @@ define void @couple_weakzerosiv(ptr noalias nocapture %A, i64 %N, i64 %M) {
 ; CHECK-NEXT:  Src: store i32 1, ptr %arrayidx.us, align 4 --> Dst: store i32 2, ptr %arrayidx9.us, align 4
 ; CHECK-NEXT:    da analyze - output [*|<]!
 ; CHECK-NEXT:  Src: store i32 2, ptr %arrayidx9.us, align 4 --> Dst: store i32 2, ptr %arrayidx9.us, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - output [* *]!
 ;
 entry:
   %cmp29 = icmp sgt i64 %N, 0

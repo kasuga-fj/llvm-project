@@ -3510,7 +3510,7 @@ bool DependenceInfo::tryDelinearizeParametricSize(
   // and dst.
   // FIXME: It may be better to record these sizes and add them as constraints
   // to the dependency checks.
-  if (!DisableDelinearizationChecks)
+  if (!DisableDelinearizationChecks) {
     for (size_t I = 1; I < Size; ++I) {
       bool SNN = isKnownNonNegative(SrcSubscripts[I], SrcPtr);
       bool DNN = isKnownNonNegative(DstSubscripts[I], DstPtr);
@@ -3534,6 +3534,20 @@ bool DependenceInfo::tryDelinearizeParametricSize(
       });
       return false;
     }
+
+    const SCEV *Prod = Sizes.back();
+    for (const SCEV *Size : drop_begin(reverse(Sizes))) {
+      if (!SE->willNotOverflow(Instruction::Mul, /*Signed=*/true, Prod, Size,
+                               Src) ||
+          !SE->willNotOverflow(Instruction::Mul, /*Signed=*/true, Prod, Size,
+                               Dst)) {
+        LLVM_DEBUG(dbgs() << "mul will overflow: " << *Prod << " * " << *Size
+                          << "\n");
+        return false;
+      }
+      Prod = SE->getMulExpr(Prod, Size);
+    }
+  }
 
   return true;
 }

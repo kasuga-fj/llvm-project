@@ -13,11 +13,11 @@ target triple = "thumbv8m.main-arm-none-eabi"
 define void @t1(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't1'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - consistent anti [0 0 0|<]!
+; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - output [* * *]!
 ;
 entry:
   %cmp49 = icmp sgt i32 %n, 0
@@ -78,7 +78,7 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t2(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't2'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
 ; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
@@ -145,7 +145,7 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t3(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't3'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
 ; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
@@ -212,7 +212,7 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t4(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't4'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
 ; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
@@ -279,7 +279,7 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t5(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't5'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
 ; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
@@ -346,11 +346,11 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t6(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't6'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
-; CHECK-NEXT:    da analyze - consistent anti [-1 0 0]!
+; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - output [* * *]!
 ;
 entry:
   %cmp49 = icmp sgt i32 %n, 0
@@ -414,11 +414,11 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t7(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't7'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
-; CHECK-NEXT:    da analyze - consistent anti [1 0 0]!
+; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - output [* * *]!
 ;
 entry:
   %cmp49 = icmp sgt i32 %n, 0
@@ -482,11 +482,11 @@ for.cond.cleanup:                                 ; preds = %for.cond.cleanup3, 
 define void @t8(i32 %n, i32 %m, i32 %o, ptr nocapture %A) {
 ; CHECK-LABEL: 't8'
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: %0 = load i32, ptr %arrayidx, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - input [* * *]!
 ; CHECK-NEXT:  Src: %0 = load i32, ptr %arrayidx, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
-; CHECK-NEXT:    da analyze - consistent anti [0 0 1]!
+; CHECK-NEXT:    da analyze - anti [* * *|<]!
 ; CHECK-NEXT:  Src: store i32 %add12, ptr %arrayidx2, align 4 --> Dst: store i32 %add12, ptr %arrayidx2, align 4
-; CHECK-NEXT:    da analyze - none!
+; CHECK-NEXT:    da analyze - output [* * *]!
 ;
 entry:
   %cmp49 = icmp sgt i32 %n, 0
@@ -705,6 +705,112 @@ loop:
   store i8 42, ptr %idx.1
   %cond.exit = icmp eq i32 %i.next, %k
   br i1 %cond.exit, label %exit, label %loop
+
+exit:
+  ret void
+}
+
+define void @mul_overflow(ptr %a, i32 %n, i32 %m) {
+; CHECK-LABEL: 'mul_overflow'
+; CHECK-NEXT:  Src: store i8 0, ptr %gep, align 1 --> Dst: store i8 0, ptr %gep, align 1
+; CHECK-NEXT:    da analyze - output [* * *]!
+;
+entry:
+  %cmp.n = icmp sgt i32 %n, 0
+  %cmp.m = icmp sgt i32 %m, 0
+  %guard = and i1 %cmp.n, %cmp.m
+  %nm = mul i32 %n, %m
+  br i1 %guard, label %loop.i.header, label %exit
+
+loop.i.header:
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop.i.latch ]
+  br label %loop.j.header
+
+loop.j.header:
+  %j = phi i32 [ 0, %loop.i.header ], [ %j.next, %loop.j.latch ]
+  br label %loop.k.header
+
+loop.k.header:
+  %k = phi i32 [ 0, %loop.j.header ], [ %k.next, %loop.k.latch ]
+  %small.j = icmp slt i32 %j, 5
+  %small.k = icmp slt i32 %k, 5
+  %small = and i1 %small.j, %small.k
+  br i1 %small, label %if.then, label %loop.k.latch
+
+if.then:
+  %offset.i = mul nsw i32 %i, %nm
+  %offset.j = mul nsw i32 %j, %m
+  %offset.0 = add nsw i32 %offset.i, %offset.j
+  %offset = add nsw i32 %offset.0, %k
+  %gep = getelementptr inbounds i8, ptr %a, i32 %offset
+  store i8 0, ptr %gep
+  br label %loop.k.latch
+
+loop.k.latch:
+  %k.next = add nsw i32 %k, 1
+  %ec.k = icmp eq i32 %k.next, %m
+  br i1 %ec.k, label %loop.j.latch, label %loop.k.header
+
+loop.j.latch:
+  %j.next = add nsw i32 %j, 1
+  %ec.j = icmp eq i32 %j.next, %n
+  br i1 %ec.j, label %loop.i.latch, label %loop.j.header
+
+loop.i.latch:
+  %i.next = add nsw i32 %i, 1
+  %ec.i = icmp eq i32 %i.next, 5
+  br i1 %ec.i, label %exit, label %loop.i.header
+
+exit:
+  ret void
+}
+
+define void @mul_no_overflow(ptr %a, i32 %n, i32 %m, i32 %o) {
+; CHECK-LABEL: 'mul_no_overflow'
+; CHECK-NEXT:  Src: store i8 0, ptr %gep, align 1 --> Dst: store i8 0, ptr %gep, align 1
+; CHECK-NEXT:    da analyze - output [* * *]!
+;
+entry:
+  %cmp.n = icmp sgt i32 %n, 0
+  %cmp.m = icmp sgt i32 %m, 0
+  %cmp.o = icmp sgt i32 %o, 0
+  %guard.0 = and i1 %cmp.n, %cmp.m
+  %guard = and i1 %guard.0, %cmp.o
+  %mo = mul nsw i32 %m, %o
+  br i1 %guard, label %loop.i.pr, label %exit
+
+loop.i.pr:
+  br label %loop.i.header
+
+loop.i.header:
+  %i = phi i32 [ 0, %loop.i.pr ], [ %i.next, %loop.i.latch ]
+  br label %loop.j.header
+
+loop.j.header:
+  %j = phi i32 [ 0, %loop.i.header ], [ %j.next, %loop.j.latch ]
+  br label %loop.k
+
+loop.k:
+  %k = phi i32 [ 0, %loop.j.header ], [ %k.next, %loop.k ]
+  %offset.i = mul nsw i32 %i, %mo
+  %offset.j = mul nsw i32 %j, %o
+  %offset.sum.tmp = add nsw i32 %offset.i, %offset.j
+  %offset.sum = add nsw i32 %offset.sum.tmp, %k
+  %gep = getelementptr inbounds i8, ptr %a, i32 %offset.sum
+  store i8 0, ptr %gep
+  %k.next = add nsw i32 %k, 1
+  %ec.k = icmp eq i32 %k.next, %o
+  br i1 %ec.k, label %loop.j.latch, label %loop.k
+
+loop.j.latch:
+  %j.next = add nsw i32 %j, 1
+  %ec.j = icmp eq i32 %j.next, %m
+  br i1 %ec.j, label %loop.i.latch, label %loop.j.header
+
+loop.i.latch:
+  %i.next = add nsw i32 %i, 1
+  %ec.i = icmp eq i32 %i.next, %n
+  br i1 %ec.i, label %exit, label %loop.i.header
 
 exit:
   ret void
