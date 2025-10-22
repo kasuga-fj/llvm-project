@@ -282,9 +282,14 @@ enum class SCEVMonotonicityType {
 
 struct SCEVMonotonicity {
   SCEVMonotonicity(SCEVMonotonicityType Type,
+                   std::optional<ConstantRange> SignedRange,
                    const SCEV *FailurePoint = nullptr);
 
   SCEVMonotonicityType getType() const { return Type; }
+
+  const std::optional<ConstantRange> &getSignedRange() const {
+    return SignedRange;
+  }
 
   const SCEV *getFailurePoint() const { return FailurePoint; }
 
@@ -294,6 +299,8 @@ struct SCEVMonotonicity {
 
 private:
   SCEVMonotonicityType Type;
+
+  std::optional<ConstantRange> SignedRange;
 
   /// The subexpression that caused Unknown. Mainly for debugging purpose.
   const SCEV *FailurePoint;
@@ -320,6 +327,8 @@ private:
   /// The outermost loop that DA is analyzing.
   const Loop *OutermostLoop;
 
+  unsigned OrigBitWidth = -1;
+
   /// A helper to classify \p Expr as either Invariant or Unknown.
   SCEVMonotonicity invariantOrUnknown(const SCEV *Expr);
 
@@ -327,18 +336,25 @@ private:
   /// loop.
   bool isLoopInvariant(const SCEV *Expr) const;
 
+  ConstantRange getSingleRange(const APInt &Value) const {
+    return ConstantRange(Value.sext(OrigBitWidth));
+  }
+
   /// A helper to create an Unknown SCEVMonotonicity.
   SCEVMonotonicity createUnknown(const SCEV *FailurePoint) {
-    return SCEVMonotonicity(SCEVMonotonicityType::Unknown, FailurePoint);
+    return SCEVMonotonicity(SCEVMonotonicityType::Unknown, std::nullopt,
+                            FailurePoint);
   }
 
   SCEVMonotonicity visitAddRecExpr(const SCEVAddRecExpr *Expr);
 
-  SCEVMonotonicity visitConstant(const SCEVConstant *) {
-    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
+  SCEVMonotonicity visitConstant(const SCEVConstant *Expr) {
+    return SCEVMonotonicity(SCEVMonotonicityType::Invariant,
+                            getSingleRange(Expr->getAPInt()));
   }
+
   SCEVMonotonicity visitVScale(const SCEVVScale *) {
-    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
+    return SCEVMonotonicity(SCEVMonotonicityType::Invariant, std::nullopt);
   }
 
   // TODO: Handle more cases.
@@ -908,8 +924,9 @@ bool DependenceInfo::intersectConstraints(Constraint *X, const Constraint *Y) {
 // SCEVMonotonicity
 
 SCEVMonotonicity::SCEVMonotonicity(SCEVMonotonicityType Type,
+                                   std::optional<ConstantRange> SignedRange,
                                    const SCEV *FailurePoint)
-    : Type(Type), FailurePoint(FailurePoint) {
+    : Type(Type), SignedRange(SignedRange), FailurePoint(FailurePoint) {
   assert(
       ((Type == SCEVMonotonicityType::Unknown) == (FailurePoint != nullptr)) &&
       "FailurePoint must be provided iff Type is Unknown");
@@ -937,8 +954,12 @@ bool SCEVMonotonicityChecker::isLoopInvariant(const SCEV *Expr) const {
 }
 
 SCEVMonotonicity SCEVMonotonicityChecker::invariantOrUnknown(const SCEV *Expr) {
-  if (isLoopInvariant(Expr))
-    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
+  if (isLoopInvariant(Expr)) {
+    std::optional<ConstantRange> Range;
+    if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Expr))
+      Range = ConstantRange(C->getAPInt());
+    return SCEVMonotonicity(SCEVMonotonicityType::Invariant, Range);
+  }
   return createUnknown(Expr);
 }
 
@@ -947,6 +968,7 @@ SCEVMonotonicityChecker::checkMonotonicity(const SCEV *Expr,
                                            const Loop *OutermostLoop) {
   assert(Expr->getType()->isIntegerTy() && "Expr must be integer type");
   this->OutermostLoop = OutermostLoop;
+  OrigBitWidth = Expr->getType()->getIntegerBitWidth();
   return visit(Expr);
 }
 
@@ -963,7 +985,7 @@ SCEVMonotonicityChecker::checkMonotonicity(const SCEV *Expr,
 /// AddRec.
 SCEVMonotonicity
 SCEVMonotonicityChecker::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
-  if (!Expr->isAffine() || !Expr->hasNoSignedWrap())
+  if (!Expr->isAffine())
     return createUnknown(Expr);
 
   const SCEV *Start = Expr->getStart();
@@ -976,7 +998,56 @@ SCEVMonotonicityChecker::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
   if (!isLoopInvariant(Step))
     return createUnknown(Expr);
 
-  return SCEVMonotonicity(SCEVMonotonicityType::MultivariateSignedMonotonic);
+  auto Range = [&]() -> std::optional<ConstantRange> {
+    if (OrigBitWidth < Expr->getType()->getIntegerBitWidth())
+      return std::nullopt;
+
+    if (!isa<SCEVConstant>(Step))
+      return std::nullopt;
+    APInt ConstStep = cast<SCEVConstant>(Step)->getAPInt().sext(OrigBitWidth);
+
+    std::optional<ConstantRange> StartRange = StartMon.getSignedRange();
+    if (!StartRange)
+      return std::nullopt;
+    assert(StartRange->getBitWidth() == OrigBitWidth &&
+           "StartRange must have the original bitwidth");
+
+    std::optional<APInt> ConstBTC = [&]() -> std::optional<APInt> {
+      const SCEV *BTC = SE->getBackedgeTakenCount(Expr->getLoop());
+      if (!BTC || !isa<SCEVConstant>(BTC))
+        return std::nullopt;
+      APInt IntBTC = cast<SCEVConstant>(BTC)->getAPInt();
+      if (OrigBitWidth < IntBTC.getBitWidth())
+        return std::nullopt;
+      APInt Res = IntBTC.zext(OrigBitWidth);
+      if (Res.isNegative())
+        return std::nullopt;
+      return Res;
+    }();
+    if (!ConstBTC)
+      return std::nullopt;
+
+    bool MulOverflow = false;
+    APInt Mul = ConstBTC->smul_ov(ConstStep, MulOverflow);
+    if (MulOverflow)
+      return std::nullopt;
+
+    APInt Zero = APInt::getZero(Mul.getBitWidth());
+    ConstantRange StepRange =
+        ConstStep.isNegative()
+            ? ConstantRange(Mul, Zero + 1)
+            : ConstantRange(APInt::getZero(Mul.getBitWidth()), Mul + 1);
+    ConstantRange::OverflowResult CROverflow =
+        StartRange->signedAddMayOverflow(StepRange);
+    if (CROverflow != ConstantRange::OverflowResult::NeverOverflows)
+      return std::nullopt;
+    return StartRange->add(StepRange);
+  }();
+
+  if (!Range && !Expr->hasNoSignedWrap())
+    return createUnknown(Expr);
+  return SCEVMonotonicity(SCEVMonotonicityType::MultivariateSignedMonotonic,
+                          Range);
 }
 
 //===----------------------------------------------------------------------===//

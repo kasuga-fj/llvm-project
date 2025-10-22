@@ -22,7 +22,7 @@ define void @linearized_offset_wrap(ptr %a) {
 ; CHECK-NEXT:    Inst: store i8 0, ptr %gep, align 1
 ; CHECK-NEXT:      Expr: {{\{\{}}0,+,32}<%loop.i.header>,+,1}<nw><%loop.j.header>
 ; CHECK-NEXT:      Monotonicity: Unknown
-; CHECK-NEXT:      Reason: {{\{\{}}0,+,32}<%loop.i.header>,+,1}<nw><%loop.j.header>
+; CHECK-NEXT:      Reason: {0,+,32}<%loop.i.header>
 ; CHECK-EMPTY:
 ; CHECK-NEXT:  Src: store i8 0, ptr %gep, align 1 --> Dst: store i8 0, ptr %gep, align 1
 ; CHECK-NEXT:    da analyze - confused!

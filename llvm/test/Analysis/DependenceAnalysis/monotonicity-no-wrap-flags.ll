@@ -208,7 +208,7 @@ define void @nested_loop_nuw(ptr %a, i64 %begin0, i64 %end0, i64 %begin1, i64 %e
 ; CHECK-NEXT:    Inst: store i8 0, ptr %idx, align 1
 ; CHECK-NEXT:      Expr: {{\{\{}}(%begin0 + %begin1),+,1}<nw><%loop.i.header>,+,1}<nw><%loop.j>
 ; CHECK-NEXT:      Monotonicity: Unknown
-; CHECK-NEXT:      Reason: {{\{\{}}(%begin0 + %begin1),+,1}<nw><%loop.i.header>,+,1}<nw><%loop.j>
+; CHECK-NEXT:      Reason: {(%begin0 + %begin1),+,1}<nw><%loop.i.header>
 ; CHECK-EMPTY:
 ; CHECK-NEXT:  Src: store i8 0, ptr %idx, align 1 --> Dst: store i8 0, ptr %idx, align 1
 ; CHECK-NEXT:    da analyze - confused!
