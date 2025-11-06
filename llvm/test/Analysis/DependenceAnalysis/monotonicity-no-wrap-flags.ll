@@ -312,7 +312,8 @@ define void @step_is_variant(ptr %a) {
 ; CHECK-NEXT:  Monotonicity check:
 ; CHECK-NEXT:    Inst: store i8 0, ptr %idx, align 1
 ; CHECK-NEXT:      Expr: {%offset.i,+,1}<nuw><nsw><%loop.j>
-; CHECK-NEXT:      Monotonicity: MultivariateSignedMonotonic
+; CHECK-NEXT:      Monotonicity: Unknown
+; CHECK-NEXT:      Reason: %offset.i
 ; CHECK-EMPTY:
 ; CHECK-NEXT:  Src: store i8 0, ptr %idx, align 1 --> Dst: store i8 0, ptr %idx, align 1
 ; CHECK-NEXT:    da analyze - confused!

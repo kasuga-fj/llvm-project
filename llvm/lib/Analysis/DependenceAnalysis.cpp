@@ -57,6 +57,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
@@ -186,7 +187,8 @@ DependenceAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   auto &AA = FAM.getResult<AAManager>(F);
   auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
   auto &LI = FAM.getResult<LoopAnalysis>(F);
-  return DependenceInfo(&F, &AA, &SE, &LI);
+  auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+  return DependenceInfo(&F, &AA, &SE, &LI, &DT);
 }
 
 AnalysisKey DependenceAnalysis::Key;
@@ -212,7 +214,8 @@ bool DependenceAnalysisWrapperPass::runOnFunction(Function &F) {
   auto &AA = getAnalysis<AAResultsWrapperPass>().getAAResults();
   auto &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   auto &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  info.reset(new DependenceInfo(&F, &AA, &SE, &LI));
+  auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+  info.reset(new DependenceInfo(&F, &AA, &SE, &LI, &DT));
   return false;
 }
 
@@ -313,16 +316,23 @@ private:
 struct SCEVMonotonicityChecker
     : public SCEVVisitor<SCEVMonotonicityChecker, SCEVMonotonicity> {
 
-  SCEVMonotonicityChecker(ScalarEvolution *SE) : SE(SE) {}
+  SCEVMonotonicityChecker(ScalarEvolution *SE, DominatorTree *DT)
+      : SE(SE), DT(DT) {}
 
   /// Check the monotonicity of \p Expr. \p Expr must be integer type. If \p
   /// OutermostLoop is not null, \p Expr must be defined in \p OutermostLoop or
   /// one of its nested loops.
-  SCEVMonotonicity checkMonotonicity(const SCEV *Expr,
-                                     const Loop *OutermostLoop);
+  SCEVMonotonicity checkMonotonicity(const SCEV *Expr, const Loop *TheLoop,
+                                     Value *Ptr = nullptr);
 
 private:
   ScalarEvolution *SE;
+
+  DominatorTree *DT;
+
+  const Loop *TheLoop;
+
+  bool InferFromNUSW = false;
 
   /// The outermost loop that DA is analyzing.
   const Loop *OutermostLoop;
@@ -412,11 +422,11 @@ private:
 // Ignores all other instructions.
 static void dumpExampleDependence(raw_ostream &OS, DependenceInfo *DA,
                                   ScalarEvolution &SE, LoopInfo &LI,
-                                  bool NormalizeResults) {
+                                  DominatorTree &DT, bool NormalizeResults) {
   auto *F = DA->getFunction();
 
   if (DumpMonotonicityReport) {
-    SCEVMonotonicityChecker Checker(&SE);
+    SCEVMonotonicityChecker Checker(&SE, &DT);
     OS << "Monotonicity check:\n";
     for (Instruction &Inst : instructions(F)) {
       if (!isa<LoadInst>(Inst) && !isa<StoreInst>(Inst))
@@ -485,16 +495,18 @@ void DependenceAnalysisWrapperPass::print(raw_ostream &OS,
                                           const Module *) const {
   dumpExampleDependence(
       OS, info.get(), getAnalysis<ScalarEvolutionWrapperPass>().getSE(),
-      getAnalysis<LoopInfoWrapperPass>().getLoopInfo(), false);
+      getAnalysis<LoopInfoWrapperPass>().getLoopInfo(),
+      getAnalysis<DominatorTreeWrapperPass>().getDomTree(), false);
 }
 
 PreservedAnalyses
 DependenceAnalysisPrinterPass::run(Function &F, FunctionAnalysisManager &FAM) {
   OS << "Printing analysis 'Dependence Analysis' for function '" << F.getName()
      << "':\n";
-  dumpExampleDependence(OS, &FAM.getResult<DependenceAnalysis>(F),
-                        FAM.getResult<ScalarEvolutionAnalysis>(F),
-                        FAM.getResult<LoopAnalysis>(F), NormalizeResults);
+  dumpExampleDependence(
+      OS, &FAM.getResult<DependenceAnalysis>(F),
+      FAM.getResult<ScalarEvolutionAnalysis>(F), FAM.getResult<LoopAnalysis>(F),
+      FAM.getResult<DominatorTreeAnalysis>(F), NormalizeResults);
   return PreservedAnalyses::all();
 }
 
@@ -963,12 +975,45 @@ SCEVMonotonicity SCEVMonotonicityChecker::invariantOrUnknown(const SCEV *Expr) {
   return createUnknown(Expr);
 }
 
-SCEVMonotonicity
-SCEVMonotonicityChecker::checkMonotonicity(const SCEV *Expr,
-                                           const Loop *OutermostLoop) {
+SCEVMonotonicity SCEVMonotonicityChecker::checkMonotonicity(const SCEV *Expr,
+                                                            const Loop *TheLoop,
+                                                            Value *Ptr) {
   assert(Expr->getType()->isIntegerTy() && "Expr must be integer type");
-  this->OutermostLoop = OutermostLoop;
+  this->TheLoop = TheLoop;
+  OutermostLoop = TheLoop ? TheLoop->getOutermostLoop() : nullptr;
   OrigBitWidth = Expr->getType()->getIntegerBitWidth();
+  InferFromNUSW = [&]() {
+    if (!DT || !OutermostLoop)
+      return false;
+
+    auto *GEP = dyn_cast_if_present<GetElementPtrInst>(Ptr);
+    if (!GEP || !GEP->hasNoUnsignedSignedWrap())
+      return false;
+
+    for (const Loop *Cur = TheLoop; Cur != OutermostLoop;
+         Cur = Cur->getParentLoop()) {
+      const Loop *Parent = Cur->getParentLoop();
+      const BasicBlock *CurPred = Cur->getLoopPredecessor();
+      if (!CurPred)
+        return false;
+
+      const BasicBlock *ParLatch = Parent->getLoopLatch();
+      if (!ParLatch)
+        return false;
+
+      // TODO: Maybe need to check Latch == Exiting.
+      if (!DT->dominates(CurPred, ParLatch))
+        return false;
+    }
+
+    const BasicBlock *Latch = TheLoop->getLoopLatch();
+    return TheLoop->getHeader() == Latch || any_of(GEP->users(), [&](User *U) {
+             if (getLoadStorePointerOperand(U) != GEP)
+               return false;
+             BasicBlock *UserBB = cast<Instruction>(U)->getParent();
+             return DT->dominates(UserBB, Latch);
+           });
+  }();
   return visit(Expr);
 }
 
@@ -1044,7 +1089,7 @@ SCEVMonotonicityChecker::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
     return StartRange->add(StepRange);
   }();
 
-  if (!Range && !Expr->hasNoSignedWrap())
+  if (!Range && !Expr->hasNoSignedWrap() && !InferFromNUSW)
     return createUnknown(Expr);
   return SCEVMonotonicity(SCEVMonotonicityType::MultivariateSignedMonotonic,
                           Range);
@@ -3930,17 +3975,16 @@ bool DependenceInfo::tryDelinearize(Instruction *Src, Instruction *Dst,
   // resize Pair to contain as many pairs of subscripts as the delinearization
   // has found, and then initialize the pairs following the delinearization.
   Pair.resize(Size);
-  SCEVMonotonicityChecker MonChecker(SE);
-  const Loop *OutermostLoop = SrcLoop ? SrcLoop->getOutermostLoop() : nullptr;
+  SCEVMonotonicityChecker MonChecker(SE, DT);
   for (int I = 0; I < Size; ++I) {
     Pair[I].Src = SrcSubscripts[I];
     Pair[I].Dst = DstSubscripts[I];
     unifySubscriptType(&Pair[I]);
 
     if (EnableMonotonicityCheck) {
-      if (MonChecker.checkMonotonicity(Pair[I].Src, OutermostLoop).isUnknown())
+      if (MonChecker.checkMonotonicity(Pair[I].Src, SrcLoop).isUnknown())
         return false;
-      if (MonChecker.checkMonotonicity(Pair[I].Dst, OutermostLoop).isUnknown())
+      if (MonChecker.checkMonotonicity(Pair[I].Dst, DstLoop).isUnknown())
         return false;
     }
   }
@@ -4145,7 +4189,8 @@ bool DependenceInfo::invalidate(Function &F, const PreservedAnalyses &PA,
   // Check transitive dependencies.
   return Inv.invalidate<AAManager>(F, PA) ||
          Inv.invalidate<ScalarEvolutionAnalysis>(F, PA) ||
-         Inv.invalidate<LoopAnalysis>(F, PA);
+         Inv.invalidate<LoopAnalysis>(F, PA) ||
+         Inv.invalidate<DominatorTreeAnalysis>(F, PA);
 }
 
 SCEVUnionPredicate DependenceInfo::getRuntimeAssumptions() const {
@@ -4275,11 +4320,11 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   Pair[0].Src = SrcEv;
   Pair[0].Dst = DstEv;
 
-  SCEVMonotonicityChecker MonChecker(SE);
-  const Loop *OutermostLoop = SrcLoop ? SrcLoop->getOutermostLoop() : nullptr;
+  SCEVMonotonicityChecker MonChecker(SE, DT);
   if (EnableMonotonicityCheck)
-    if (MonChecker.checkMonotonicity(Pair[0].Src, OutermostLoop).isUnknown() ||
-        MonChecker.checkMonotonicity(Pair[0].Dst, OutermostLoop).isUnknown())
+    if (MonChecker.checkMonotonicity(Pair[0].Src, SrcLoop, SrcPtr)
+            .isUnknown() ||
+        MonChecker.checkMonotonicity(Pair[0].Dst, DstLoop, DstPtr).isUnknown())
       return std::make_unique<Dependence>(Src, Dst,
                                           SCEVUnionPredicate(Assume, *SE));
 

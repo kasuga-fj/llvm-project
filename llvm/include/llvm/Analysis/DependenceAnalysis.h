@@ -347,8 +347,9 @@ private:
 /// DependenceInfo - This class is the main dependence-analysis driver.
 class DependenceInfo {
 public:
-  DependenceInfo(Function *F, AAResults *AA, ScalarEvolution *SE, LoopInfo *LI)
-      : AA(AA), SE(SE), LI(LI), F(F) {}
+  DependenceInfo(Function *F, AAResults *AA, ScalarEvolution *SE, LoopInfo *LI,
+                 DominatorTree *DT = nullptr)
+      : AA(AA), SE(SE), LI(LI), F(F), DT(DT) {}
 
   /// Handle transitive invalidation when the cached analysis results go away.
   LLVM_ABI bool invalidate(Function &F, const PreservedAnalyses &PA,
@@ -418,6 +419,7 @@ private:
   ScalarEvolution *SE;
   LoopInfo *LI;
   Function *F;
+  DominatorTree *DT;
   SmallVector<const SCEVPredicate *, 4> Assumptions;
 
   /// Subscript - This private struct represents a pair of subscripts from
