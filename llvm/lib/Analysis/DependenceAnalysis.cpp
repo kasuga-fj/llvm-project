@@ -686,6 +686,30 @@ SCEVMonotonicityChecker::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
 //===----------------------------------------------------------------------===//
 // DependenceInfo methods
 
+bool DependenceInfo::Subscript::isSingleIV(ScalarEvolution &SE) const {
+  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(Expr);
+  if (!AR || !AR->isAffine())
+    return false;
+
+  const Loop *L = AR->getLoop();
+  const SCEV *Start = AR->getStart();
+  return SE.isLoopInvariant(Start, L->getOutermostLoop());
+}
+
+const SCEV *
+DependenceInfo::Subscript::getSingleIVCoeff(ScalarEvolution &SE) const {
+  assert(isSingleIV(SE) && "Not a single IV subscript");
+  const SCEVAddRecExpr *AR = cast<SCEVAddRecExpr>(Expr);
+  return AR->getStepRecurrence(SE);
+}
+
+const SCEV *
+DependenceInfo::Subscript::getSingleIVConst(ScalarEvolution &SE) const {
+  assert(isSingleIV(SE) && "Not a single IV subscript");
+  const SCEVAddRecExpr *AR = cast<SCEVAddRecExpr>(Expr);
+  return AR->getStart();
+}
+
 // For debugging purposes. Dumps a dependence to OS.
 void Dependence::dump(raw_ostream &OS) const {
   if (isConfused())
@@ -983,16 +1007,16 @@ void DependenceInfo::collectCommonLoops(const SCEV *Expression,
   }
 }
 
-void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
+void DependenceInfo::unifySubscriptType(ArrayRef<SubscriptPair *> Pairs) {
 
   unsigned widestWidthSeen = 0;
   Type *widestType;
 
   // Go through each pair and find the widest bit to which we need
   // to extend all of them.
-  for (Subscript *Pair : Pairs) {
-    const SCEV *Src = Pair->Src;
-    const SCEV *Dst = Pair->Dst;
+  for (SubscriptPair *Pair : Pairs) {
+    const SCEV *Src = Pair->Src.getExpr();
+    const SCEV *Dst = Pair->Dst.getExpr();
     IntegerType *SrcTy = dyn_cast<IntegerType>(Src->getType());
     IntegerType *DstTy = dyn_cast<IntegerType>(Dst->getType());
     if (SrcTy == nullptr || DstTy == nullptr) {
@@ -1014,9 +1038,9 @@ void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
   assert(widestWidthSeen > 0);
 
   // Now extend each pair to the widest seen.
-  for (Subscript *Pair : Pairs) {
-    const SCEV *Src = Pair->Src;
-    const SCEV *Dst = Pair->Dst;
+  for (SubscriptPair *Pair : Pairs) {
+    const SCEV *Src = Pair->Src.getExpr();
+    const SCEV *Dst = Pair->Dst.getExpr();
     IntegerType *SrcTy = dyn_cast<IntegerType>(Src->getType());
     IntegerType *DstTy = dyn_cast<IntegerType>(Dst->getType());
     if (SrcTy == nullptr || DstTy == nullptr) {
@@ -1027,10 +1051,12 @@ void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
     }
     if (SrcTy->getBitWidth() < widestWidthSeen)
       // Sign-extend Src to widestType
-      Pair->Src = SE->getSignExtendExpr(Src, widestType);
+      Pair->Src = Subscript(SE->getSignExtendExpr(Src, widestType),
+                            Pair->Src.getCtxI());
     if (DstTy->getBitWidth() < widestWidthSeen) {
       // Sign-extend Dst to widestType
-      Pair->Dst = SE->getSignExtendExpr(Dst, widestType);
+      Pair->Dst = Subscript(SE->getSignExtendExpr(Dst, widestType),
+                            Pair->Dst.getCtxI());
     }
   }
 }
@@ -1039,9 +1065,9 @@ void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
 // If the source and destination are identically sign (or zero)
 // extended, it strips off the extension in an effect to simplify
 // the actual analysis.
-void DependenceInfo::removeMatchingExtensions(Subscript *Pair) {
-  const SCEV *Src = Pair->Src;
-  const SCEV *Dst = Pair->Dst;
+void DependenceInfo::removeMatchingExtensions(SubscriptPair *Pair) {
+  const SCEV *Src = Pair->Src.getExpr();
+  const SCEV *Dst = Pair->Dst.getExpr();
   if ((isa<SCEVZeroExtendExpr>(Src) && isa<SCEVZeroExtendExpr>(Dst)) ||
       (isa<SCEVSignExtendExpr>(Src) && isa<SCEVSignExtendExpr>(Dst))) {
     const SCEVIntegralCastExpr *SrcCast = cast<SCEVIntegralCastExpr>(Src);
@@ -1049,8 +1075,8 @@ void DependenceInfo::removeMatchingExtensions(Subscript *Pair) {
     const SCEV *SrcCastOp = SrcCast->getOperand();
     const SCEV *DstCastOp = DstCast->getOperand();
     if (SrcCastOp->getType() == DstCastOp->getType()) {
-      Pair->Src = SrcCastOp;
-      Pair->Dst = DstCastOp;
+      Pair->Src = Subscript(SrcCastOp, Pair->Src.getCtxI());
+      Pair->Dst = Subscript(DstCastOp, Pair->Dst.getCtxI());
     }
   }
 }
@@ -1102,27 +1128,27 @@ bool DependenceInfo::checkDstSubscript(const SCEV *Dst, const Loop *LoopNest,
 // Examines the subscript pair (the Src and Dst SCEVs)
 // and classifies it as either ZIV, SIV, RDIV, MIV, or Nonlinear.
 // Collects the associated loops in a set.
-DependenceInfo::Subscript::ClassificationKind
+DependenceInfo::SubscriptPair::ClassificationKind
 DependenceInfo::classifyPair(const SCEV *Src, const Loop *SrcLoopNest,
                              const SCEV *Dst, const Loop *DstLoopNest,
                              SmallBitVector &Loops) {
   SmallBitVector SrcLoops(MaxLevels + 1);
   SmallBitVector DstLoops(MaxLevels + 1);
   if (!checkSrcSubscript(Src, SrcLoopNest, SrcLoops))
-    return Subscript::NonLinear;
+    return SubscriptPair::NonLinear;
   if (!checkDstSubscript(Dst, DstLoopNest, DstLoops))
-    return Subscript::NonLinear;
+    return SubscriptPair::NonLinear;
   Loops = SrcLoops;
   Loops |= DstLoops;
   unsigned N = Loops.count();
   if (N == 0)
-    return Subscript::ZIV;
+    return SubscriptPair::ZIV;
   if (N == 1)
-    return Subscript::SIV;
+    return SubscriptPair::SIV;
   if (N == 2 && (SrcLoops.count() == 0 || DstLoops.count() == 0 ||
                  (SrcLoops.count() == 1 && DstLoops.count() == 1)))
-    return Subscript::RDIV;
-  return Subscript::MIV;
+    return SubscriptPair::RDIV;
+  return SubscriptPair::MIV;
 }
 
 // A wrapper around SCEV::isKnownPredicate.
@@ -3250,7 +3276,7 @@ const SCEV *DependenceInfo::getUpperBound(BoundInfo *Bound) const {
 /// this function flattens the nested recurrences into separate recurrences
 /// for each loop level.
 bool DependenceInfo::tryDelinearize(Instruction *Src, Instruction *Dst,
-                                    SmallVectorImpl<Subscript> &Pair) {
+                                    SmallVectorImpl<SubscriptPair> &Pair) {
   assert(isLoadOrStore(Src) && "instruction is not load or store");
   assert(isLoadOrStore(Dst) && "instruction is not load or store");
   Value *SrcPtr = getLoadStorePointerOperand(Src);
@@ -3297,14 +3323,16 @@ bool DependenceInfo::tryDelinearize(Instruction *Src, Instruction *Dst,
   SCEVMonotonicityChecker MonChecker(SE);
   const Loop *OutermostLoop = SrcLoop ? SrcLoop->getOutermostLoop() : nullptr;
   for (int I = 0; I < Size; ++I) {
-    Pair[I].Src = SrcSubscripts[I];
-    Pair[I].Dst = DstSubscripts[I];
+    Pair[I].Src = Subscript(SrcSubscripts[I], Src);
+    Pair[I].Dst = Subscript(DstSubscripts[I], Dst);
     unifySubscriptType(&Pair[I]);
 
     if (EnableMonotonicityCheck) {
-      if (MonChecker.checkMonotonicity(Pair[I].Src, OutermostLoop).isUnknown())
+      if (MonChecker.checkMonotonicity(Pair[I].Src.getExpr(), OutermostLoop)
+              .isUnknown())
         return false;
-      if (MonChecker.checkMonotonicity(Pair[I].Dst, OutermostLoop).isUnknown())
+      if (MonChecker.checkMonotonicity(Pair[I].Dst.getExpr(), OutermostLoop)
+              .isUnknown())
         return false;
     }
   }
@@ -3631,15 +3659,17 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   }
 
   unsigned Pairs = 1;
-  SmallVector<Subscript, 2> Pair(Pairs);
-  Pair[0].Src = SrcEv;
-  Pair[0].Dst = DstEv;
+  SmallVector<SubscriptPair, 2> Pair(Pairs);
+  Pair[0].Src = Subscript(SrcEv, Src);
+  Pair[0].Dst = Subscript(DstEv, Dst);
 
   SCEVMonotonicityChecker MonChecker(SE);
   const Loop *OutermostLoop = SrcLoop ? SrcLoop->getOutermostLoop() : nullptr;
   if (EnableMonotonicityCheck)
-    if (MonChecker.checkMonotonicity(Pair[0].Src, OutermostLoop).isUnknown() ||
-        MonChecker.checkMonotonicity(Pair[0].Dst, OutermostLoop).isUnknown())
+    if (MonChecker.checkMonotonicity(Pair[0].Src.getExpr(), OutermostLoop)
+            .isUnknown() ||
+        MonChecker.checkMonotonicity(Pair[0].Dst.getExpr(), OutermostLoop)
+            .isUnknown())
       return std::make_unique<Dependence>(Src, Dst,
                                           SCEVUnionPredicate(Assume, *SE));
 
@@ -3665,12 +3695,12 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     // Revoke if there are any tests other than ZIV, SIV or RDIV
     for (unsigned P = 0; P < Pairs; ++P) {
       SmallBitVector Loops;
-      Subscript::ClassificationKind TestClass =
-          classifyPair(Pair[P].Src, LI->getLoopFor(Src->getParent()),
-                       Pair[P].Dst, LI->getLoopFor(Dst->getParent()), Loops);
+      SubscriptPair::ClassificationKind TestClass = classifyPair(
+          Pair[P].Src.getExpr(), LI->getLoopFor(Src->getParent()),
+          Pair[P].Dst.getExpr(), LI->getLoopFor(Dst->getParent()), Loops);
 
-      if (TestClass != Subscript::ZIV && TestClass != Subscript::SIV &&
-          TestClass != Subscript::RDIV) {
+      if (TestClass != SubscriptPair::ZIV && TestClass != SubscriptPair::SIV &&
+          TestClass != SubscriptPair::RDIV) {
         // Revert the levels to not consider the SameSD levels
         CommonLevels -= SameSDLevels;
         MaxLevels += SameSDLevels;
@@ -3688,20 +3718,22 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   ++TotalArrayPairs;
 
   for (unsigned P = 0; P < Pairs; ++P) {
-    assert(Pair[P].Src->getType()->isIntegerTy() && "Src must be an integer");
-    assert(Pair[P].Dst->getType()->isIntegerTy() && "Dst must be an integer");
+    assert(Pair[P].Src.getExpr()->getType()->isIntegerTy() &&
+           "Src must be an integer");
+    assert(Pair[P].Dst.getExpr()->getType()->isIntegerTy() &&
+           "Dst must be an integer");
     Pair[P].Loops.resize(MaxLevels + 1);
     Pair[P].GroupLoops.resize(MaxLevels + 1);
     Pair[P].Group.resize(Pairs);
     removeMatchingExtensions(&Pair[P]);
-    Pair[P].Classification =
-        classifyPair(Pair[P].Src, LI->getLoopFor(Src->getParent()), Pair[P].Dst,
-                     LI->getLoopFor(Dst->getParent()), Pair[P].Loops);
+    Pair[P].Classification = classifyPair(
+        Pair[P].Src.getExpr(), LI->getLoopFor(Src->getParent()),
+        Pair[P].Dst.getExpr(), LI->getLoopFor(Dst->getParent()), Pair[P].Loops);
     Pair[P].GroupLoops = Pair[P].Loops;
     Pair[P].Group.set(P);
     LLVM_DEBUG(dbgs() << "    subscript " << P << "\n");
-    LLVM_DEBUG(dbgs() << "\tsrc = " << *Pair[P].Src << "\n");
-    LLVM_DEBUG(dbgs() << "\tdst = " << *Pair[P].Dst << "\n");
+    LLVM_DEBUG(dbgs() << "\tsrc = " << *Pair[P].Src.getExpr() << "\n");
+    LLVM_DEBUG(dbgs() << "\tdst = " << *Pair[P].Dst.getExpr() << "\n");
     LLVM_DEBUG(dbgs() << "\tclass = " << Pair[P].Classification << "\n");
     LLVM_DEBUG(dbgs() << "\tloops = ");
     LLVM_DEBUG(dumpSmallBitVector(Pair[P].Loops));
@@ -3711,35 +3743,37 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   for (unsigned SI = 0; SI < Pairs; ++SI) {
     LLVM_DEBUG(dbgs() << "testing subscript " << SI);
     switch (Pair[SI].Classification) {
-    case Subscript::NonLinear:
+    case SubscriptPair::NonLinear:
       // ignore these, but collect loops for later
       ++NonlinearSubscriptPairs;
-      collectCommonLoops(Pair[SI].Src, LI->getLoopFor(Src->getParent()),
-                         Pair[SI].Loops);
-      collectCommonLoops(Pair[SI].Dst, LI->getLoopFor(Dst->getParent()),
-                         Pair[SI].Loops);
+      collectCommonLoops(Pair[SI].Src.getExpr(),
+                         LI->getLoopFor(Src->getParent()), Pair[SI].Loops);
+      collectCommonLoops(Pair[SI].Dst.getExpr(),
+                         LI->getLoopFor(Dst->getParent()), Pair[SI].Loops);
       Result.Consistent = false;
       break;
-    case Subscript::ZIV:
+    case SubscriptPair::ZIV:
       LLVM_DEBUG(dbgs() << ", ZIV\n");
-      if (testZIV(Pair[SI].Src, Pair[SI].Dst, Result))
+      if (testZIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(), Result))
         return nullptr;
       break;
-    case Subscript::SIV: {
+    case SubscriptPair::SIV: {
       LLVM_DEBUG(dbgs() << ", SIV\n");
       unsigned Level;
-      if (testSIV(Pair[SI].Src, Pair[SI].Dst, Level, Result))
+      if (testSIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(), Level,
+                  Result))
         return nullptr;
       break;
     }
-    case Subscript::RDIV:
+    case SubscriptPair::RDIV:
       LLVM_DEBUG(dbgs() << ", RDIV\n");
-      if (testRDIV(Pair[SI].Src, Pair[SI].Dst, Result))
+      if (testRDIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(), Result))
         return nullptr;
       break;
-    case Subscript::MIV:
+    case SubscriptPair::MIV:
       LLVM_DEBUG(dbgs() << ", MIV\n");
-      if (testMIV(Pair[SI].Src, Pair[SI].Dst, Pair[SI].Loops, Result))
+      if (testMIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(),
+                  Pair[SI].Loops, Result))
         return nullptr;
       break;
     }

@@ -366,12 +366,31 @@ private:
   Function *F;
   SmallVector<const SCEVPredicate *, 4> Assumptions;
 
-  /// Subscript - This private struct represents a pair of subscripts from
-  /// a pair of potentially multi-dimensional array references. We use a
-  /// vector of them to guide subscript partitioning.
-  struct Subscript {
-    const SCEV *Src;
-    const SCEV *Dst;
+  class Subscript {
+    const SCEV *Expr = nullptr;
+    Instruction *CtxI = nullptr;
+
+  public:
+    Subscript() : Subscript(nullptr, nullptr) {}
+    Subscript(const SCEV *E, Instruction *I) : Expr(E), CtxI(I) {}
+
+    const SCEV *getExpr() const { return Expr; }
+
+    Instruction *getCtxI() const { return CtxI; }
+
+    bool isSingleIV(ScalarEvolution &SE) const;
+
+    const SCEV *getSingleIVCoeff(ScalarEvolution &SE) const;
+
+    const SCEV *getSingleIVConst(ScalarEvolution &SE) const;
+  };
+
+  /// SubscriptPair - This private struct represents a pair of subscripts from
+  /// a pair of potentially multi-dimensional array references. We use a vector
+  /// of them to guide subscript partitioning.
+  struct SubscriptPair {
+    Subscript Src;
+    Subscript Dst;
     enum ClassificationKind { ZIV, SIV, RDIV, MIV, NonLinear } Classification;
     SmallBitVector Loops;
     SmallBitVector GroupLoops;
@@ -481,13 +500,13 @@ private:
   /// sign-extending as necessary.
   /// Sign-extending a subscript is safe because getelementptr assumes the
   /// array subscripts are signed.
-  void unifySubscriptType(ArrayRef<Subscript *> Pairs);
+  void unifySubscriptType(ArrayRef<SubscriptPair *> Pairs);
 
   /// removeMatchingExtensions - Examines a subscript pair.
   /// If the source and destination are identically sign (or zero)
   /// extended, it strips off the extension in an effort to
   /// simplify the actual analysis.
-  void removeMatchingExtensions(Subscript *Pair);
+  void removeMatchingExtensions(SubscriptPair *Pair);
 
   /// collectCommonLoops - Finds the set of loops from the LoopNest that
   /// have a level <= CommonLevels and are referred to by the SCEV Expression.
@@ -537,7 +556,7 @@ private:
   /// classifyPair - Examines the subscript pair (the Src and Dst SCEVs)
   /// and classifies it as either ZIV, SIV, RDIV, MIV, or Nonlinear.
   /// Collects the associated loops in a set.
-  Subscript::ClassificationKind
+  SubscriptPair::ClassificationKind
   classifyPair(const SCEV *Src, const Loop *SrcLoopNest, const SCEV *Dst,
                const Loop *DstLoopNest, SmallBitVector &Loops);
 
@@ -770,7 +789,7 @@ private:
   /// Given a linear access function, tries to recover subscripts
   /// for each dimension of the array element access.
   bool tryDelinearize(Instruction *Src, Instruction *Dst,
-                      SmallVectorImpl<Subscript> &Pair);
+                      SmallVectorImpl<SubscriptPair> &Pair);
 
   /// Tries to delinearize \p Src and \p Dst access functions for a fixed size
   /// multi-dimensional array. Calls tryDelinearizeFixedSizeImpl() to
