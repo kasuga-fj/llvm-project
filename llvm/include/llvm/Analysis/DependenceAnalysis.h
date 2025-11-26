@@ -41,6 +41,7 @@
 
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
@@ -332,6 +333,189 @@ private:
   friend class DependenceInfo;
 };
 
+/// The property of monotonicity of a SCEV. To define the monotonicity, assume
+/// a SCEV defined within N-nested loops. Let i_k denote the iteration number
+/// of the k-th loop. Then we can regard the SCEV as an N-ary function:
+///
+///   F(i_1, i_2, ..., i_N)
+///
+/// The domain of i_k is the closed range [0, BTC_k], where BTC_k is the
+/// backedge-taken count of the k-th loop.
+///
+/// A function F is said to be "monotonically increasing with respect to the
+/// k-th loop" if x <= y implies the following condition:
+///
+///   F(i_1, ..., i_{k-1}, x, i_{k+1}, ..., i_N) <=
+///   F(i_1, ..., i_{k-1}, y, i_{k+1}, ..., i_N)
+///
+/// where i_1, ..., i_{k-1}, i_{k+1}, ..., i_N, x, and y are elements of their
+/// respective domains.
+///
+/// Likewise F is "monotonically decreasing with respect to the k-th loop"
+/// if x <= y implies
+///
+///   F(i_1, ..., i_{k-1}, x, i_{k+1}, ..., i_N) >=
+///   F(i_1, ..., i_{k-1}, y, i_{k+1}, ..., i_N)
+///
+/// A function F that is monotonically increasing or decreasing with respect to
+/// the k-th loop is simply called "monotonic with respect to k-th loop".
+///
+/// A function F is said to be "multivariate monotonic" when it is monotonic
+/// with respect to all of the N loops.
+///
+/// Since integer comparison can be either signed or unsigned, we need to
+/// distinguish monotonicity in the signed sense from that in the unsigned
+/// sense. Note that the inequality "x <= y" merely indicates loop progression
+/// and is not affected by the difference between signed and unsigned order.
+///
+/// Currently we only consider monotonicity in a signed sense.
+enum class SCEVMonotonicityType {
+  /// We don't know anything about the monotonicity of the SCEV.
+  Unknown,
+
+  /// The SCEV is loop-invariant with respect to the outermost loop. In other
+  /// words, the function F corresponding to the SCEV is a constant function.
+  Invariant,
+
+  /// The function F corresponding to the SCEV is multivariate monotonic in a
+  /// signed sense. Note that the multivariate monotonic function may also be a
+  /// constant function. The order employed in the definition of monotonicity
+  /// is not strict order.
+  MultivariateSignedMonotonic,
+};
+
+/// The domain on which monotonicity is checked for F(i_1, i_2, ..., i_N).
+enum class SCEVMonotonicityDomain {
+  /// [0, BTC_0] x [0, BTC_1] x ... x [0, BTC_N].
+  /// If any BTC_k is unknown, F is not monotonic on EntireDomain.
+  EntireDomain,
+
+  /// [L_0, U_0] x [L_1, U_1] x ... x [L_N, U_N].
+  /// Given N integers c_1, c_2, ..., c_N, if F(c_1, c_2, ..., c_N) is
+  /// "executed", then L_k <= c_k <= U_k must hold for all k.
+  EffectiveDomain,
+};
+
+struct SCEVMonotonicity {
+  SCEVMonotonicity(SCEVMonotonicityType Type,
+                   const SCEV *FailurePoint = nullptr);
+
+  SCEVMonotonicityType getType() const { return Type; }
+
+  const SCEV *getFailurePoint() const { return FailurePoint; }
+
+  bool isUnknown() const { return Type == SCEVMonotonicityType::Unknown; }
+
+  void print(raw_ostream &OS, unsigned Depth) const;
+
+private:
+  SCEVMonotonicityType Type;
+
+  /// The subexpression that caused Unknown. Mainly for debugging purpose.
+  const SCEV *FailurePoint;
+};
+
+/// Check the monotonicity of a SCEV. Since dependence tests (SIV, MIV, etc.)
+/// assume that subscript expressions are (multivariate) monotonic, we need to
+/// verify this property before applying those tests. Violating this assumption
+/// may cause them to produce incorrect results.
+struct SCEVMonotonicityChecker
+    : public SCEVVisitor<SCEVMonotonicityChecker, SCEVMonotonicity> {
+
+  SCEVMonotonicityChecker(ScalarEvolution *SE) : SE(SE) {}
+
+  /// Check the monotonicity of \p Expr. \p Expr must be integer type. If \p
+  /// OutermostLoop is not null, \p Expr must be defined in \p OutermostLoop or
+  /// one of its nested loops.
+  SCEVMonotonicity checkMonotonicity(const SCEV *Expr,
+                                     const Loop *OutermostLoop,
+                                     SCEVMonotonicityDomain Domain);
+
+private:
+  ScalarEvolution *SE;
+
+  struct Context {
+    /// The outermost loop that DA is analyzing.
+    const Loop *OutermostLoop;
+
+    bool FoundInnermostAddRec = false;
+
+    SCEVMonotonicityDomain Domain;
+
+    void clear() {
+      OutermostLoop = nullptr;
+      FoundInnermostAddRec = false;
+    }
+  } Ctx;
+
+  /// A helper to classify \p Expr as either Invariant or Unknown.
+  SCEVMonotonicity invariantOrUnknown(const SCEV *Expr);
+
+  /// Return true if \p Expr is loop-invariant with respect to the outermost
+  /// loop.
+  bool isLoopInvariant(const SCEV *Expr) const;
+
+  /// A helper to create an Unknown SCEVMonotonicity.
+  SCEVMonotonicity createUnknown(const SCEV *FailurePoint) {
+    return SCEVMonotonicity(SCEVMonotonicityType::Unknown, FailurePoint);
+  }
+
+  SCEVMonotonicity visitAddRecExpr(const SCEVAddRecExpr *Expr);
+
+  SCEVMonotonicity visitConstant(const SCEVConstant *) {
+    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
+  }
+  SCEVMonotonicity visitVScale(const SCEVVScale *) {
+    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
+  }
+
+  // TODO: Handle more cases.
+  SCEVMonotonicity visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitAddExpr(const SCEVAddExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitMulExpr(const SCEVMulExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitPtrToIntExpr(const SCEVPtrToIntExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitTruncateExpr(const SCEVTruncateExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitUDivExpr(const SCEVUDivExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitSMaxExpr(const SCEVSMaxExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitUMaxExpr(const SCEVUMaxExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitSMinExpr(const SCEVSMinExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitUMinExpr(const SCEVUMinExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitSequentialUMinExpr(const SCEVSequentialUMinExpr *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitUnknown(const SCEVUnknown *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+  SCEVMonotonicity visitCouldNotCompute(const SCEVCouldNotCompute *Expr) {
+    return invariantOrUnknown(Expr);
+  }
+
+  friend struct SCEVVisitor<SCEVMonotonicityChecker, SCEVMonotonicity>;
+};
+
 /// DependenceInfo - This class is the main dependence-analysis driver.
 class DependenceInfo {
 public:
@@ -366,12 +550,35 @@ private:
   Function *F;
   SmallVector<const SCEVPredicate *, 4> Assumptions;
 
-  /// Subscript - This private struct represents a pair of subscripts from
-  /// a pair of potentially multi-dimensional array references. We use a
-  /// vector of them to guide subscript partitioning.
-  struct Subscript {
-    const SCEV *Src;
-    const SCEV *Dst;
+  class Subscript {
+    const SCEV *Expr = nullptr;
+    Instruction *CtxI = nullptr;
+
+  public:
+    Subscript() : Subscript(nullptr, nullptr) {}
+    Subscript(const SCEV *E, Instruction *I) : Expr(E), CtxI(I) {}
+
+    const SCEV *getExpr() const { return Expr; }
+
+    Instruction *getCtxI() const { return CtxI; }
+
+    const Loop *getLoop(const LoopInfo &LI) const;
+
+    const Loop *getOutermostLoop(const LoopInfo &LI) const;
+
+    bool isSingleIV(ScalarEvolution &SE) const;
+
+    const SCEV *getSingleIVCoeff(ScalarEvolution &SE) const;
+
+    const SCEV *getSingleIVConst(ScalarEvolution &SE) const;
+  };
+
+  /// SubscriptPair - This private struct represents a pair of subscripts from
+  /// a pair of potentially multi-dimensional array references. We use a vector
+  /// of them to guide subscript partitioning.
+  struct SubscriptPair {
+    Subscript Src;
+    Subscript Dst;
     enum ClassificationKind { ZIV, SIV, RDIV, MIV, NonLinear } Classification;
     SmallBitVector Loops;
     SmallBitVector GroupLoops;
@@ -481,13 +688,13 @@ private:
   /// sign-extending as necessary.
   /// Sign-extending a subscript is safe because getelementptr assumes the
   /// array subscripts are signed.
-  void unifySubscriptType(ArrayRef<Subscript *> Pairs);
+  void unifySubscriptType(ArrayRef<SubscriptPair *> Pairs);
 
   /// removeMatchingExtensions - Examines a subscript pair.
   /// If the source and destination are identically sign (or zero)
   /// extended, it strips off the extension in an effort to
   /// simplify the actual analysis.
-  void removeMatchingExtensions(Subscript *Pair);
+  void removeMatchingExtensions(SubscriptPair *Pair);
 
   /// collectCommonLoops - Finds the set of loops from the LoopNest that
   /// have a level <= CommonLevels and are referred to by the SCEV Expression.
@@ -537,7 +744,7 @@ private:
   /// classifyPair - Examines the subscript pair (the Src and Dst SCEVs)
   /// and classifies it as either ZIV, SIV, RDIV, MIV, or Nonlinear.
   /// Collects the associated loops in a set.
-  Subscript::ClassificationKind
+  SubscriptPair::ClassificationKind
   classifyPair(const SCEV *Src, const Loop *SrcLoopNest, const SCEV *Dst,
                const Loop *DstLoopNest, SmallBitVector &Loops);
 
@@ -558,7 +765,7 @@ private:
   /// the distance vector entry.
   /// If the dependence isn't proven to exist,
   /// marks the Result as inconsistent.
-  bool testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
+  bool testSIV(const Subscript &Src, const Subscript &Dst, unsigned &Level,
                FullDependence &Result) const;
 
   /// testRDIV - Tests the RDIV subscript pair (Src and Dst) for dependence.
@@ -586,9 +793,7 @@ private:
   /// Returns true if any possible dependence is disproved.
   /// If there might be a dependence, returns false.
   /// Sets appropriate direction and distance.
-  bool strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
-                     const SCEV *DstConst, const Loop *CurrentSrcLoop,
-                     const Loop *CurrentDstLoop, unsigned Level,
+  bool strongSIVtest(const Subscript &Src, const Subscript &Dst, unsigned Level,
                      FullDependence &Result) const;
 
   /// weakCrossingSIVtest - Tests the weak-crossing SIV subscript pair
@@ -770,7 +975,7 @@ private:
   /// Given a linear access function, tries to recover subscripts
   /// for each dimension of the array element access.
   bool tryDelinearize(Instruction *Src, Instruction *Dst,
-                      SmallVectorImpl<Subscript> &Pair);
+                      SmallVectorImpl<SubscriptPair> &Pair);
 
   /// Tries to delinearize \p Src and \p Dst access functions for a fixed size
   /// multi-dimensional array. Calls tryDelinearizeFixedSizeImpl() to
@@ -793,6 +998,8 @@ private:
   /// checkDstSubscript to avoid duplicate code
   bool checkSubscript(const SCEV *Expr, const Loop *LoopNest,
                       SmallBitVector &Loops, bool IsSrc);
+
+  bool isMonotonic(const Subscript &S, SCEVMonotonicityDomain Domain) const;
 }; // class DependenceInfo
 
 /// AnalysisPass to compute dependence information in a function

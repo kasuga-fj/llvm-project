@@ -50,7 +50,6 @@
 #include "llvm/Analysis/Delinearization.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
@@ -155,13 +154,6 @@ static cl::opt<DependenceTestType> EnableDependenceTest(
                clEnumValN(DependenceTestType::BanerjeeMIV, "banerjee-miv",
                           "Enable only Banerjee MIV test.")));
 
-// TODO: This flag is disabled by default because it is still under development.
-// Enable it or delete this flag when the feature is ready.
-static cl::opt<bool> EnableMonotonicityCheck(
-    "da-enable-monotonicity-check", cl::init(false), cl::Hidden,
-    cl::desc("Check if the subscripts are monotonic. If it's not, dependence "
-             "is reported as unknown."));
-
 static cl::opt<bool> DumpMonotonicityReport(
     "da-dump-monotonicity-report", cl::init(false), cl::Hidden,
     cl::desc(
@@ -216,169 +208,6 @@ void DependenceAnalysisWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequiredTransitive<LoopInfoWrapperPass>();
 }
 
-namespace {
-
-/// The property of monotonicity of a SCEV. To define the monotonicity, assume
-/// a SCEV defined within N-nested loops. Let i_k denote the iteration number
-/// of the k-th loop. Then we can regard the SCEV as an N-ary function:
-///
-///   F(i_1, i_2, ..., i_N)
-///
-/// The domain of i_k is the closed range [0, BTC_k], where BTC_k is the
-/// backedge-taken count of the k-th loop.
-///
-/// A function F is said to be "monotonically increasing with respect to the
-/// k-th loop" if x <= y implies the following condition:
-///
-///   F(i_1, ..., i_{k-1}, x, i_{k+1}, ..., i_N) <=
-///   F(i_1, ..., i_{k-1}, y, i_{k+1}, ..., i_N)
-///
-/// where i_1, ..., i_{k-1}, i_{k+1}, ..., i_N, x, and y are elements of their
-/// respective domains.
-///
-/// Likewise F is "monotonically decreasing with respect to the k-th loop"
-/// if x <= y implies
-///
-///   F(i_1, ..., i_{k-1}, x, i_{k+1}, ..., i_N) >=
-///   F(i_1, ..., i_{k-1}, y, i_{k+1}, ..., i_N)
-///
-/// A function F that is monotonically increasing or decreasing with respect to
-/// the k-th loop is simply called "monotonic with respect to k-th loop".
-///
-/// A function F is said to be "multivariate monotonic" when it is monotonic
-/// with respect to all of the N loops.
-///
-/// Since integer comparison can be either signed or unsigned, we need to
-/// distinguish monotonicity in the signed sense from that in the unsigned
-/// sense. Note that the inequality "x <= y" merely indicates loop progression
-/// and is not affected by the difference between signed and unsigned order.
-///
-/// Currently we only consider monotonicity in a signed sense.
-enum class SCEVMonotonicityType {
-  /// We don't know anything about the monotonicity of the SCEV.
-  Unknown,
-
-  /// The SCEV is loop-invariant with respect to the outermost loop. In other
-  /// words, the function F corresponding to the SCEV is a constant function.
-  Invariant,
-
-  /// The function F corresponding to the SCEV is multivariate monotonic in a
-  /// signed sense. Note that the multivariate monotonic function may also be a
-  /// constant function. The order employed in the definition of monotonicity
-  /// is not strict order.
-  MultivariateSignedMonotonic,
-};
-
-struct SCEVMonotonicity {
-  SCEVMonotonicity(SCEVMonotonicityType Type,
-                   const SCEV *FailurePoint = nullptr);
-
-  SCEVMonotonicityType getType() const { return Type; }
-
-  const SCEV *getFailurePoint() const { return FailurePoint; }
-
-  bool isUnknown() const { return Type == SCEVMonotonicityType::Unknown; }
-
-  void print(raw_ostream &OS, unsigned Depth) const;
-
-private:
-  SCEVMonotonicityType Type;
-
-  /// The subexpression that caused Unknown. Mainly for debugging purpose.
-  const SCEV *FailurePoint;
-};
-
-/// Check the monotonicity of a SCEV. Since dependence tests (SIV, MIV, etc.)
-/// assume that subscript expressions are (multivariate) monotonic, we need to
-/// verify this property before applying those tests. Violating this assumption
-/// may cause them to produce incorrect results.
-struct SCEVMonotonicityChecker
-    : public SCEVVisitor<SCEVMonotonicityChecker, SCEVMonotonicity> {
-
-  SCEVMonotonicityChecker(ScalarEvolution *SE) : SE(SE) {}
-
-  /// Check the monotonicity of \p Expr. \p Expr must be integer type. If \p
-  /// OutermostLoop is not null, \p Expr must be defined in \p OutermostLoop or
-  /// one of its nested loops.
-  SCEVMonotonicity checkMonotonicity(const SCEV *Expr,
-                                     const Loop *OutermostLoop);
-
-private:
-  ScalarEvolution *SE;
-
-  /// The outermost loop that DA is analyzing.
-  const Loop *OutermostLoop;
-
-  /// A helper to classify \p Expr as either Invariant or Unknown.
-  SCEVMonotonicity invariantOrUnknown(const SCEV *Expr);
-
-  /// Return true if \p Expr is loop-invariant with respect to the outermost
-  /// loop.
-  bool isLoopInvariant(const SCEV *Expr) const;
-
-  /// A helper to create an Unknown SCEVMonotonicity.
-  SCEVMonotonicity createUnknown(const SCEV *FailurePoint) {
-    return SCEVMonotonicity(SCEVMonotonicityType::Unknown, FailurePoint);
-  }
-
-  SCEVMonotonicity visitAddRecExpr(const SCEVAddRecExpr *Expr);
-
-  SCEVMonotonicity visitConstant(const SCEVConstant *) {
-    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
-  }
-  SCEVMonotonicity visitVScale(const SCEVVScale *) {
-    return SCEVMonotonicity(SCEVMonotonicityType::Invariant);
-  }
-
-  // TODO: Handle more cases.
-  SCEVMonotonicity visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitAddExpr(const SCEVAddExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitMulExpr(const SCEVMulExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitPtrToIntExpr(const SCEVPtrToIntExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitTruncateExpr(const SCEVTruncateExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitUDivExpr(const SCEVUDivExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitSMaxExpr(const SCEVSMaxExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitUMaxExpr(const SCEVUMaxExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitSMinExpr(const SCEVSMinExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitUMinExpr(const SCEVUMinExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitSequentialUMinExpr(const SCEVSequentialUMinExpr *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitUnknown(const SCEVUnknown *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-  SCEVMonotonicity visitCouldNotCompute(const SCEVCouldNotCompute *Expr) {
-    return invariantOrUnknown(Expr);
-  }
-
-  friend struct SCEVVisitor<SCEVMonotonicityChecker, SCEVMonotonicity>;
-};
-
-} // anonymous namespace
-
 // Used to test the dependence analyzer.
 // Looks through the function, noting instructions that may access memory.
 // Calls depends() on every possible pair and prints out the result.
@@ -399,10 +228,19 @@ static void dumpExampleDependence(raw_ostream &OS, DependenceInfo *DA,
       const Loop *OutermostLoop = L ? L->getOutermostLoop() : nullptr;
       const SCEV *PtrSCEV = SE.getSCEVAtScope(Ptr, L);
       const SCEV *AccessFn = SE.removePointerBase(PtrSCEV);
-      SCEVMonotonicity Mon = Checker.checkMonotonicity(AccessFn, OutermostLoop);
       OS.indent(2) << "Inst: " << Inst << "\n";
       OS.indent(4) << "Expr: " << *AccessFn << "\n";
-      Mon.print(OS, 4);
+      for (SCEVMonotonicityDomain Domain :
+           {SCEVMonotonicityDomain::EffectiveDomain,
+            SCEVMonotonicityDomain::EntireDomain}) {
+        OS.indent(4) << (Domain == SCEVMonotonicityDomain::EffectiveDomain
+                             ? "EffectiveDomain"
+                             : "EntireDomain")
+                     << "\n";
+        SCEVMonotonicity Mon =
+            Checker.checkMonotonicity(AccessFn, OutermostLoop, Domain);
+        Mon.print(OS, 6);
+      }
     }
     OS << "\n";
   }
@@ -635,7 +473,9 @@ void SCEVMonotonicity::print(raw_ostream &OS, unsigned Depth) const {
 }
 
 bool SCEVMonotonicityChecker::isLoopInvariant(const SCEV *Expr) const {
-  return !OutermostLoop || SE->isLoopInvariant(Expr, OutermostLoop);
+  if (isa<SCEVCouldNotCompute>(Expr))
+    return false;
+  return !Ctx.OutermostLoop || SE->isLoopInvariant(Expr, Ctx.OutermostLoop);
 }
 
 SCEVMonotonicity SCEVMonotonicityChecker::invariantOrUnknown(const SCEV *Expr) {
@@ -646,11 +486,14 @@ SCEVMonotonicity SCEVMonotonicityChecker::invariantOrUnknown(const SCEV *Expr) {
 
 SCEVMonotonicity
 SCEVMonotonicityChecker::checkMonotonicity(const SCEV *Expr,
-                                           const Loop *OutermostLoop) {
+                                           const Loop *OutermostLoop,
+                                           SCEVMonotonicityDomain Domain) {
   assert((!OutermostLoop || OutermostLoop->isOutermost()) &&
          "OutermostLoop must be outermost");
   assert(Expr->getType()->isIntegerTy() && "Expr must be integer type");
-  this->OutermostLoop = OutermostLoop;
+  Ctx.clear();
+  Ctx.OutermostLoop = OutermostLoop;
+  Ctx.Domain = Domain;
   return visit(Expr);
 }
 
@@ -667,24 +510,71 @@ SCEVMonotonicityChecker::checkMonotonicity(const SCEV *Expr,
 /// AddRec.
 SCEVMonotonicity
 SCEVMonotonicityChecker::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
-  if (!Expr->isAffine() || !Expr->hasNoSignedWrap())
-    return createUnknown(Expr);
+  auto Res = [&]() {
+    if (!Expr->isAffine() || !Expr->hasNoSignedWrap())
+      return createUnknown(Expr);
 
-  const SCEV *Start = Expr->getStart();
-  const SCEV *Step = Expr->getStepRecurrence(*SE);
+    const SCEV *Start = Expr->getStart();
+    const SCEV *Step = Expr->getStepRecurrence(*SE);
 
-  SCEVMonotonicity StartMon = visit(Start);
-  if (StartMon.isUnknown())
-    return StartMon;
+    SCEVMonotonicity StartMon = visit(Start);
+    if (StartMon.isUnknown())
+      return StartMon;
 
-  if (!isLoopInvariant(Step))
-    return createUnknown(Expr);
+    if (!isLoopInvariant(Step))
+      return createUnknown(Expr);
 
-  return SCEVMonotonicity(SCEVMonotonicityType::MultivariateSignedMonotonic);
+    if (Ctx.Domain == SCEVMonotonicityDomain::EntireDomain) {
+      if (Ctx.FoundInnermostAddRec)
+        return createUnknown(Expr);
+      const SCEV *BTC = SE->getBackedgeTakenCount(Expr->getLoop());
+      if (!BTC || !isLoopInvariant(BTC))
+        return createUnknown(Expr);
+    }
+
+    return SCEVMonotonicity(SCEVMonotonicityType::MultivariateSignedMonotonic);
+  }();
+
+  Ctx.FoundInnermostAddRec = true;
+  return Res;
 }
 
 //===----------------------------------------------------------------------===//
 // DependenceInfo methods
+
+bool DependenceInfo::Subscript::isSingleIV(ScalarEvolution &SE) const {
+  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(Expr);
+  if (!AR || !AR->isAffine())
+    return false;
+
+  const Loop *L = AR->getLoop();
+  const SCEV *Start = AR->getStart();
+  return SE.isLoopInvariant(Start, L->getOutermostLoop());
+}
+
+const SCEV *
+DependenceInfo::Subscript::getSingleIVCoeff(ScalarEvolution &SE) const {
+  assert(isSingleIV(SE) && "Not a single IV subscript");
+  const SCEVAddRecExpr *AR = cast<SCEVAddRecExpr>(Expr);
+  return AR->getStepRecurrence(SE);
+}
+
+const SCEV *
+DependenceInfo::Subscript::getSingleIVConst(ScalarEvolution &SE) const {
+  assert(isSingleIV(SE) && "Not a single IV subscript");
+  const SCEVAddRecExpr *AR = cast<SCEVAddRecExpr>(Expr);
+  return AR->getStart();
+}
+
+const Loop *DependenceInfo::Subscript::getLoop(const LoopInfo &LI) const {
+  return LI.getLoopFor(CtxI->getParent());
+}
+
+const Loop *
+DependenceInfo::Subscript::getOutermostLoop(const LoopInfo &LI) const {
+  const Loop *L = getLoop(LI);
+  return L ? L->getOutermostLoop() : nullptr;
+}
 
 // For debugging purposes. Dumps a dependence to OS.
 void Dependence::dump(raw_ostream &OS) const {
@@ -983,16 +873,16 @@ void DependenceInfo::collectCommonLoops(const SCEV *Expression,
   }
 }
 
-void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
+void DependenceInfo::unifySubscriptType(ArrayRef<SubscriptPair *> Pairs) {
 
   unsigned widestWidthSeen = 0;
   Type *widestType;
 
   // Go through each pair and find the widest bit to which we need
   // to extend all of them.
-  for (Subscript *Pair : Pairs) {
-    const SCEV *Src = Pair->Src;
-    const SCEV *Dst = Pair->Dst;
+  for (SubscriptPair *Pair : Pairs) {
+    const SCEV *Src = Pair->Src.getExpr();
+    const SCEV *Dst = Pair->Dst.getExpr();
     IntegerType *SrcTy = dyn_cast<IntegerType>(Src->getType());
     IntegerType *DstTy = dyn_cast<IntegerType>(Dst->getType());
     if (SrcTy == nullptr || DstTy == nullptr) {
@@ -1014,9 +904,9 @@ void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
   assert(widestWidthSeen > 0);
 
   // Now extend each pair to the widest seen.
-  for (Subscript *Pair : Pairs) {
-    const SCEV *Src = Pair->Src;
-    const SCEV *Dst = Pair->Dst;
+  for (SubscriptPair *Pair : Pairs) {
+    const SCEV *Src = Pair->Src.getExpr();
+    const SCEV *Dst = Pair->Dst.getExpr();
     IntegerType *SrcTy = dyn_cast<IntegerType>(Src->getType());
     IntegerType *DstTy = dyn_cast<IntegerType>(Dst->getType());
     if (SrcTy == nullptr || DstTy == nullptr) {
@@ -1027,10 +917,12 @@ void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
     }
     if (SrcTy->getBitWidth() < widestWidthSeen)
       // Sign-extend Src to widestType
-      Pair->Src = SE->getSignExtendExpr(Src, widestType);
+      Pair->Src = Subscript(SE->getSignExtendExpr(Src, widestType),
+                            Pair->Src.getCtxI());
     if (DstTy->getBitWidth() < widestWidthSeen) {
       // Sign-extend Dst to widestType
-      Pair->Dst = SE->getSignExtendExpr(Dst, widestType);
+      Pair->Dst = Subscript(SE->getSignExtendExpr(Dst, widestType),
+                            Pair->Dst.getCtxI());
     }
   }
 }
@@ -1039,9 +931,9 @@ void DependenceInfo::unifySubscriptType(ArrayRef<Subscript *> Pairs) {
 // If the source and destination are identically sign (or zero)
 // extended, it strips off the extension in an effect to simplify
 // the actual analysis.
-void DependenceInfo::removeMatchingExtensions(Subscript *Pair) {
-  const SCEV *Src = Pair->Src;
-  const SCEV *Dst = Pair->Dst;
+void DependenceInfo::removeMatchingExtensions(SubscriptPair *Pair) {
+  const SCEV *Src = Pair->Src.getExpr();
+  const SCEV *Dst = Pair->Dst.getExpr();
   if ((isa<SCEVZeroExtendExpr>(Src) && isa<SCEVZeroExtendExpr>(Dst)) ||
       (isa<SCEVSignExtendExpr>(Src) && isa<SCEVSignExtendExpr>(Dst))) {
     const SCEVIntegralCastExpr *SrcCast = cast<SCEVIntegralCastExpr>(Src);
@@ -1049,8 +941,8 @@ void DependenceInfo::removeMatchingExtensions(Subscript *Pair) {
     const SCEV *SrcCastOp = SrcCast->getOperand();
     const SCEV *DstCastOp = DstCast->getOperand();
     if (SrcCastOp->getType() == DstCastOp->getType()) {
-      Pair->Src = SrcCastOp;
-      Pair->Dst = DstCastOp;
+      Pair->Src = Subscript(SrcCastOp, Pair->Src.getCtxI());
+      Pair->Dst = Subscript(DstCastOp, Pair->Dst.getCtxI());
     }
   }
 }
@@ -1102,27 +994,27 @@ bool DependenceInfo::checkDstSubscript(const SCEV *Dst, const Loop *LoopNest,
 // Examines the subscript pair (the Src and Dst SCEVs)
 // and classifies it as either ZIV, SIV, RDIV, MIV, or Nonlinear.
 // Collects the associated loops in a set.
-DependenceInfo::Subscript::ClassificationKind
+DependenceInfo::SubscriptPair::ClassificationKind
 DependenceInfo::classifyPair(const SCEV *Src, const Loop *SrcLoopNest,
                              const SCEV *Dst, const Loop *DstLoopNest,
                              SmallBitVector &Loops) {
   SmallBitVector SrcLoops(MaxLevels + 1);
   SmallBitVector DstLoops(MaxLevels + 1);
   if (!checkSrcSubscript(Src, SrcLoopNest, SrcLoops))
-    return Subscript::NonLinear;
+    return SubscriptPair::NonLinear;
   if (!checkDstSubscript(Dst, DstLoopNest, DstLoops))
-    return Subscript::NonLinear;
+    return SubscriptPair::NonLinear;
   Loops = SrcLoops;
   Loops |= DstLoops;
   unsigned N = Loops.count();
   if (N == 0)
-    return Subscript::ZIV;
+    return SubscriptPair::ZIV;
   if (N == 1)
-    return Subscript::SIV;
+    return SubscriptPair::SIV;
   if (N == 2 && (SrcLoops.count() == 0 || DstLoops.count() == 0 ||
                  (SrcLoops.count() == 1 && DstLoops.count() == 1)))
-    return Subscript::RDIV;
-  return Subscript::MIV;
+    return SubscriptPair::RDIV;
+  return SubscriptPair::MIV;
 }
 
 // A wrapper around SCEV::isKnownPredicate.
@@ -1286,37 +1178,25 @@ static const SCEV *minusSCEVNoSignedOverflow(const SCEV *A, const SCEV *B,
   return nullptr;
 }
 
-/// Returns \p A * \p B if it guaranteed not to signed wrap. Otherwise returns
-/// nullptr. \p A and \p B must have the same integer type.
-static const SCEV *mulSCEVNoSignedOverflow(const SCEV *A, const SCEV *B,
-                                           ScalarEvolution &SE) {
-  if (SE.willNotOverflow(Instruction::Mul, /*Signed=*/true, A, B))
-    return SE.getMulExpr(A, B);
-  return nullptr;
-}
-
-/// Returns the absolute value of \p A. In the context of dependence analysis,
-/// we need an absolute value in a mathematical sense. If \p A is the signed
-/// minimum value, we cannot represent it unless extending the original type.
-/// Thus if we cannot prove that \p A is not the signed minimum value, returns
-/// nullptr.
-static const SCEV *absSCEVNoSignedOverflow(const SCEV *A, ScalarEvolution &SE) {
-  IntegerType *Ty = cast<IntegerType>(A->getType());
-  if (!Ty)
-    return nullptr;
-
-  const SCEV *SMin =
-      SE.getConstant(APInt::getSignedMinValue(Ty->getBitWidth()));
-  if (!SE.isKnownPredicate(CmpInst::ICMP_NE, A, SMin))
-    return nullptr;
-  return SE.getAbsExpr(A, /*IsNSW=*/true);
-}
-
 /// Returns true iff \p Test is enabled.
 static bool isDependenceTestEnabled(DependenceTestType Test) {
   if (EnableDependenceTest == DependenceTestType::All)
     return true;
   return EnableDependenceTest == Test;
+}
+
+bool DependenceInfo::isMonotonic(const Subscript &S,
+                                 SCEVMonotonicityDomain Domain) const {
+  SCEVMonotonicity Mon = SCEVMonotonicityChecker(SE).checkMonotonicity(
+      S.getExpr(), S.getOutermostLoop(*LI), Domain);
+  switch (Mon.getType()) {
+  case SCEVMonotonicityType::Invariant:
+  case SCEVMonotonicityType::MultivariateSignedMonotonic:
+    return true;
+  case SCEVMonotonicityType::Unknown:
+    return false;
+  }
+  llvm_unreachable("Unknown SCEVMonotonicityType");
 }
 
 // testZIV -
@@ -1375,13 +1255,18 @@ bool DependenceInfo::testZIV(const SCEV *Src, const SCEV *Dst,
 //                { > if d < 0
 //
 // Return true if dependence disproved.
-bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
-                                   const SCEV *DstConst, const Loop *CurSrcLoop,
-                                   const Loop *CurDstLoop, unsigned Level,
+bool DependenceInfo::strongSIVtest(const Subscript &Src, const Subscript &Dst,
+                                   unsigned Level,
                                    FullDependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::StrongSIV))
     return false;
 
+  const SCEV *Coeff = Src.getSingleIVCoeff(*SE);
+  const SCEV *SrcConst = Src.getSingleIVConst(*SE);
+  const SCEV *DstConst = Dst.getSingleIVConst(*SE);
+
+  assert(Coeff == Dst.getSingleIVCoeff(*SE) &&
+         "Mismatched coefficients in Strong SIV test");
   LLVM_DEBUG(dbgs() << "\tStrong SIV test\n");
   LLVM_DEBUG(dbgs() << "\t    Coeff = " << *Coeff);
   LLVM_DEBUG(dbgs() << ", " << *Coeff->getType() << "\n");
@@ -1393,40 +1278,56 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
   assert(0 < Level && Level <= CommonLevels && "level out of range");
   Level--;
 
+  if (isMonotonic(Src, SCEVMonotonicityDomain::EntireDomain) &&
+      isMonotonic(Dst, SCEVMonotonicityDomain::EntireDomain)) {
+    bool NoOverlap = [&]() {
+      const SCEV *UpperBound =
+          collectUpperBound(Src.getLoop(*LI), Coeff->getType());
+      assert(UpperBound &&
+             "Entire monotonicity requires computable upper bound");
+
+      const auto *SrcExpr = dyn_cast<SCEVAddRecExpr>(Src.getExpr());
+      const auto *DstExpr = dyn_cast<SCEVAddRecExpr>(Dst.getExpr());
+      const SCEV *Zero = SE->getZero(Coeff->getType());
+      const SCEV *SrcBegin = SrcExpr->evaluateAtIteration(Zero, *SE);
+      const SCEV *DstBegin = DstExpr->evaluateAtIteration(Zero, *SE);
+      const SCEV *SrcEnd = SrcExpr->evaluateAtIteration(UpperBound, *SE);
+      const SCEV *DstEnd = DstExpr->evaluateAtIteration(UpperBound, *SE);
+      if (SE->isKnownNonNegative(Coeff)) {
+        if (SE->isKnownPredicate(CmpInst::ICMP_SLT, SrcEnd, DstBegin) ||
+            SE->isKnownPredicate(CmpInst::ICMP_SLT, DstEnd, SrcBegin)) {
+          return true;
+        }
+      } else if (SE->isKnownNonPositive(Coeff)) {
+        if (SE->isKnownPredicate(CmpInst::ICMP_SLT, SrcBegin, DstEnd) ||
+            SE->isKnownPredicate(CmpInst::ICMP_SLT, DstBegin, SrcEnd)) {
+          return true;
+        }
+      }
+
+      return false;
+    }();
+    if (NoOverlap) {
+      // Distance greater than trip count - no dependence
+      ++StrongSIVindependence;
+      ++StrongSIVsuccesses;
+      return true;
+    }
+  }
+
   const SCEV *Delta = minusSCEVNoSignedOverflow(SrcConst, DstConst, *SE);
   if (!Delta) {
     Result.Consistent = false;
     return false;
   }
+
   LLVM_DEBUG(dbgs() << "\t    Delta = " << *Delta);
   LLVM_DEBUG(dbgs() << ", " << *Delta->getType() << "\n");
 
-  // check that |Delta| < iteration count
-  bool IsDeltaLarge = [&] {
-    const SCEV *UpperBound = collectUpperBound(CurSrcLoop, Delta->getType());
-    if (!UpperBound)
-      return false;
-
-    LLVM_DEBUG(dbgs() << "\t    UpperBound = " << *UpperBound);
-    LLVM_DEBUG(dbgs() << ", " << *UpperBound->getType() << "\n");
-    const SCEV *AbsDelta = absSCEVNoSignedOverflow(Delta, *SE);
-    const SCEV *AbsCoeff = absSCEVNoSignedOverflow(Coeff, *SE);
-    if (!AbsDelta || !AbsCoeff)
-      return false;
-    const SCEV *Product = mulSCEVNoSignedOverflow(UpperBound, AbsCoeff, *SE);
-    if (!Product)
-      return false;
-    return isKnownPredicate(CmpInst::ICMP_SGT, AbsDelta, Product);
-  }();
-  if (IsDeltaLarge) {
-    // Distance greater than trip count - no dependence
-    ++StrongSIVindependence;
-    ++StrongSIVsuccesses;
-    return true;
-  }
-
   // Can we compute distance?
-  if (isa<SCEVConstant>(Delta) && isa<SCEVConstant>(Coeff)) {
+  if (isa<SCEVConstant>(Delta) && isa<SCEVConstant>(Coeff) &&
+      isMonotonic(Src, SCEVMonotonicityDomain::EffectiveDomain) &&
+      isMonotonic(Dst, SCEVMonotonicityDomain::EffectiveDomain)) {
     APInt ConstDelta = cast<SCEVConstant>(Delta)->getAPInt();
     APInt ConstCoeff = cast<SCEVConstant>(Coeff)->getAPInt();
     APInt Distance = ConstDelta; // these need to be initialized
@@ -2412,12 +2313,12 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
 // they apply; they're cheaper and sometimes more precise.
 //
 // Return true if dependence disproved.
-bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
-                             FullDependence &Result) const {
-  LLVM_DEBUG(dbgs() << "    src = " << *Src << "\n");
-  LLVM_DEBUG(dbgs() << "    dst = " << *Dst << "\n");
-  const SCEVAddRecExpr *SrcAddRec = dyn_cast<SCEVAddRecExpr>(Src);
-  const SCEVAddRecExpr *DstAddRec = dyn_cast<SCEVAddRecExpr>(Dst);
+bool DependenceInfo::testSIV(const Subscript &Src, const Subscript &Dst,
+                             unsigned &Level, FullDependence &Result) const {
+  LLVM_DEBUG(dbgs() << "    src = " << *Src.getExpr() << "\n");
+  LLVM_DEBUG(dbgs() << "    dst = " << *Dst.getExpr() << "\n");
+  const SCEVAddRecExpr *SrcAddRec = dyn_cast<SCEVAddRecExpr>(Src.getExpr());
+  const SCEVAddRecExpr *DstAddRec = dyn_cast<SCEVAddRecExpr>(Dst.getExpr());
   if (SrcAddRec && DstAddRec) {
     const SCEV *SrcConst = SrcAddRec->getStart();
     const SCEV *DstConst = DstAddRec->getStart();
@@ -2431,37 +2332,36 @@ bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
     Level = mapSrcLoop(CurSrcLoop);
     bool disproven;
     if (SrcCoeff == DstCoeff)
-      disproven = strongSIVtest(SrcCoeff, SrcConst, DstConst, CurSrcLoop,
-                                CurDstLoop, Level, Result);
+      disproven = strongSIVtest(Src, Dst, Level, Result);
     else if (SrcCoeff == SE->getNegativeSCEV(DstCoeff))
       disproven = weakCrossingSIVtest(SrcCoeff, SrcConst, DstConst, CurSrcLoop,
                                       CurDstLoop, Level, Result);
     else
       disproven = exactSIVtest(SrcCoeff, DstCoeff, SrcConst, DstConst,
                                CurSrcLoop, CurDstLoop, Level, Result);
-    return disproven || gcdMIVtest(Src, Dst, Result) ||
+    return disproven || gcdMIVtest(Src.getExpr(), Dst.getExpr(), Result) ||
            symbolicRDIVtest(SrcCoeff, DstCoeff, SrcConst, DstConst, CurSrcLoop,
                             CurDstLoop);
   }
   if (SrcAddRec) {
     const SCEV *SrcConst = SrcAddRec->getStart();
     const SCEV *SrcCoeff = SrcAddRec->getStepRecurrence(*SE);
-    const SCEV *DstConst = Dst;
+    const SCEV *DstConst = Dst.getExpr();
     const Loop *CurSrcLoop = SrcAddRec->getLoop();
     Level = mapSrcLoop(CurSrcLoop);
     return weakZeroDstSIVtest(SrcCoeff, SrcConst, DstConst, CurSrcLoop,
                               CurSrcLoop, Level, Result) ||
-           gcdMIVtest(Src, Dst, Result);
+           gcdMIVtest(Src.getExpr(), Dst.getExpr(), Result);
   }
   if (DstAddRec) {
     const SCEV *DstConst = DstAddRec->getStart();
     const SCEV *DstCoeff = DstAddRec->getStepRecurrence(*SE);
-    const SCEV *SrcConst = Src;
+    const SCEV *SrcConst = Src.getExpr();
     const Loop *CurDstLoop = DstAddRec->getLoop();
     Level = mapDstLoop(CurDstLoop);
     return weakZeroSrcSIVtest(DstCoeff, SrcConst, DstConst, CurDstLoop,
                               CurDstLoop, Level, Result) ||
-           gcdMIVtest(Src, Dst, Result);
+           gcdMIVtest(Src.getExpr(), Dst.getExpr(), Result);
   }
   llvm_unreachable("SIV test expected at least one AddRec");
   return false;
@@ -3250,7 +3150,7 @@ const SCEV *DependenceInfo::getUpperBound(BoundInfo *Bound) const {
 /// this function flattens the nested recurrences into separate recurrences
 /// for each loop level.
 bool DependenceInfo::tryDelinearize(Instruction *Src, Instruction *Dst,
-                                    SmallVectorImpl<Subscript> &Pair) {
+                                    SmallVectorImpl<SubscriptPair> &Pair) {
   assert(isLoadOrStore(Src) && "instruction is not load or store");
   assert(isLoadOrStore(Dst) && "instruction is not load or store");
   Value *SrcPtr = getLoadStorePointerOperand(Src);
@@ -3294,19 +3194,10 @@ bool DependenceInfo::tryDelinearize(Instruction *Src, Instruction *Dst,
   // resize Pair to contain as many pairs of subscripts as the delinearization
   // has found, and then initialize the pairs following the delinearization.
   Pair.resize(Size);
-  SCEVMonotonicityChecker MonChecker(SE);
-  const Loop *OutermostLoop = SrcLoop ? SrcLoop->getOutermostLoop() : nullptr;
   for (int I = 0; I < Size; ++I) {
-    Pair[I].Src = SrcSubscripts[I];
-    Pair[I].Dst = DstSubscripts[I];
+    Pair[I].Src = Subscript(SrcSubscripts[I], Src);
+    Pair[I].Dst = Subscript(DstSubscripts[I], Dst);
     unifySubscriptType(&Pair[I]);
-
-    if (EnableMonotonicityCheck) {
-      if (MonChecker.checkMonotonicity(Pair[I].Src, OutermostLoop).isUnknown())
-        return false;
-      if (MonChecker.checkMonotonicity(Pair[I].Dst, OutermostLoop).isUnknown())
-        return false;
-    }
   }
 
   return true;
@@ -3631,17 +3522,9 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   }
 
   unsigned Pairs = 1;
-  SmallVector<Subscript, 2> Pair(Pairs);
-  Pair[0].Src = SrcEv;
-  Pair[0].Dst = DstEv;
-
-  SCEVMonotonicityChecker MonChecker(SE);
-  const Loop *OutermostLoop = SrcLoop ? SrcLoop->getOutermostLoop() : nullptr;
-  if (EnableMonotonicityCheck)
-    if (MonChecker.checkMonotonicity(Pair[0].Src, OutermostLoop).isUnknown() ||
-        MonChecker.checkMonotonicity(Pair[0].Dst, OutermostLoop).isUnknown())
-      return std::make_unique<Dependence>(Src, Dst,
-                                          SCEVUnionPredicate(Assume, *SE));
+  SmallVector<SubscriptPair, 2> Pair(Pairs);
+  Pair[0].Src = Subscript(SrcEv, Src);
+  Pair[0].Dst = Subscript(DstEv, Dst);
 
   if (Delinearize) {
     if (tryDelinearize(Src, Dst, Pair)) {
@@ -3665,12 +3548,12 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     // Revoke if there are any tests other than ZIV, SIV or RDIV
     for (unsigned P = 0; P < Pairs; ++P) {
       SmallBitVector Loops;
-      Subscript::ClassificationKind TestClass =
-          classifyPair(Pair[P].Src, LI->getLoopFor(Src->getParent()),
-                       Pair[P].Dst, LI->getLoopFor(Dst->getParent()), Loops);
+      SubscriptPair::ClassificationKind TestClass = classifyPair(
+          Pair[P].Src.getExpr(), LI->getLoopFor(Src->getParent()),
+          Pair[P].Dst.getExpr(), LI->getLoopFor(Dst->getParent()), Loops);
 
-      if (TestClass != Subscript::ZIV && TestClass != Subscript::SIV &&
-          TestClass != Subscript::RDIV) {
+      if (TestClass != SubscriptPair::ZIV && TestClass != SubscriptPair::SIV &&
+          TestClass != SubscriptPair::RDIV) {
         // Revert the levels to not consider the SameSD levels
         CommonLevels -= SameSDLevels;
         MaxLevels += SameSDLevels;
@@ -3688,20 +3571,22 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   ++TotalArrayPairs;
 
   for (unsigned P = 0; P < Pairs; ++P) {
-    assert(Pair[P].Src->getType()->isIntegerTy() && "Src must be an integer");
-    assert(Pair[P].Dst->getType()->isIntegerTy() && "Dst must be an integer");
+    assert(Pair[P].Src.getExpr()->getType()->isIntegerTy() &&
+           "Src must be an integer");
+    assert(Pair[P].Dst.getExpr()->getType()->isIntegerTy() &&
+           "Dst must be an integer");
     Pair[P].Loops.resize(MaxLevels + 1);
     Pair[P].GroupLoops.resize(MaxLevels + 1);
     Pair[P].Group.resize(Pairs);
     removeMatchingExtensions(&Pair[P]);
-    Pair[P].Classification =
-        classifyPair(Pair[P].Src, LI->getLoopFor(Src->getParent()), Pair[P].Dst,
-                     LI->getLoopFor(Dst->getParent()), Pair[P].Loops);
+    Pair[P].Classification = classifyPair(
+        Pair[P].Src.getExpr(), LI->getLoopFor(Src->getParent()),
+        Pair[P].Dst.getExpr(), LI->getLoopFor(Dst->getParent()), Pair[P].Loops);
     Pair[P].GroupLoops = Pair[P].Loops;
     Pair[P].Group.set(P);
     LLVM_DEBUG(dbgs() << "    subscript " << P << "\n");
-    LLVM_DEBUG(dbgs() << "\tsrc = " << *Pair[P].Src << "\n");
-    LLVM_DEBUG(dbgs() << "\tdst = " << *Pair[P].Dst << "\n");
+    LLVM_DEBUG(dbgs() << "\tsrc = " << *Pair[P].Src.getExpr() << "\n");
+    LLVM_DEBUG(dbgs() << "\tdst = " << *Pair[P].Dst.getExpr() << "\n");
     LLVM_DEBUG(dbgs() << "\tclass = " << Pair[P].Classification << "\n");
     LLVM_DEBUG(dbgs() << "\tloops = ");
     LLVM_DEBUG(dumpSmallBitVector(Pair[P].Loops));
@@ -3711,35 +3596,36 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   for (unsigned SI = 0; SI < Pairs; ++SI) {
     LLVM_DEBUG(dbgs() << "testing subscript " << SI);
     switch (Pair[SI].Classification) {
-    case Subscript::NonLinear:
+    case SubscriptPair::NonLinear:
       // ignore these, but collect loops for later
       ++NonlinearSubscriptPairs;
-      collectCommonLoops(Pair[SI].Src, LI->getLoopFor(Src->getParent()),
-                         Pair[SI].Loops);
-      collectCommonLoops(Pair[SI].Dst, LI->getLoopFor(Dst->getParent()),
-                         Pair[SI].Loops);
+      collectCommonLoops(Pair[SI].Src.getExpr(),
+                         LI->getLoopFor(Src->getParent()), Pair[SI].Loops);
+      collectCommonLoops(Pair[SI].Dst.getExpr(),
+                         LI->getLoopFor(Dst->getParent()), Pair[SI].Loops);
       Result.Consistent = false;
       break;
-    case Subscript::ZIV:
+    case SubscriptPair::ZIV:
       LLVM_DEBUG(dbgs() << ", ZIV\n");
-      if (testZIV(Pair[SI].Src, Pair[SI].Dst, Result))
+      if (testZIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(), Result))
         return nullptr;
       break;
-    case Subscript::SIV: {
+    case SubscriptPair::SIV: {
       LLVM_DEBUG(dbgs() << ", SIV\n");
       unsigned Level;
       if (testSIV(Pair[SI].Src, Pair[SI].Dst, Level, Result))
         return nullptr;
       break;
     }
-    case Subscript::RDIV:
+    case SubscriptPair::RDIV:
       LLVM_DEBUG(dbgs() << ", RDIV\n");
-      if (testRDIV(Pair[SI].Src, Pair[SI].Dst, Result))
+      if (testRDIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(), Result))
         return nullptr;
       break;
-    case Subscript::MIV:
+    case SubscriptPair::MIV:
       LLVM_DEBUG(dbgs() << ", MIV\n");
-      if (testMIV(Pair[SI].Src, Pair[SI].Dst, Pair[SI].Loops, Result))
+      if (testMIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(),
+                  Pair[SI].Loops, Result))
         return nullptr;
       break;
     }
