@@ -384,6 +384,11 @@ enum class SCEVMonotonicityType {
   MultivariateSignedMonotonic,
 };
 
+enum class SCEVMonotonicityDomain {
+  EntireDomain,
+  EffectiveDomain,
+};
+
 struct SCEVMonotonicity {
   SCEVMonotonicity(SCEVMonotonicityType Type,
                    const SCEV *FailurePoint = nullptr);
@@ -416,13 +421,25 @@ struct SCEVMonotonicityChecker
   /// OutermostLoop is not null, \p Expr must be defined in \p OutermostLoop or
   /// one of its nested loops.
   SCEVMonotonicity checkMonotonicity(const SCEV *Expr,
-                                     const Loop *OutermostLoop);
+                                     const Loop *OutermostLoop,
+                                     SCEVMonotonicityDomain Domain);
 
 private:
   ScalarEvolution *SE;
 
-  /// The outermost loop that DA is analyzing.
-  const Loop *OutermostLoop;
+  struct Context {
+    /// The outermost loop that DA is analyzing.
+    const Loop *OutermostLoop;
+
+    bool FoundInnermostAddRec = false;
+
+    SCEVMonotonicityDomain Domain;
+
+    void clear() {
+      OutermostLoop = nullptr;
+      FoundInnermostAddRec = false;
+    }
+  } Ctx;
 
   /// A helper to classify \p Expr as either Invariant or Unknown.
   SCEVMonotonicity invariantOrUnknown(const SCEV *Expr);
@@ -496,7 +513,7 @@ private:
 class DependenceInfo {
 public:
   DependenceInfo(Function *F, AAResults *AA, ScalarEvolution *SE, LoopInfo *LI)
-      : AA(AA), SE(SE), LI(LI), F(F) {}
+      : AA(AA), SE(SE), LI(LI), F(F), MonChecker(SE) {}
 
   /// Handle transitive invalidation when the cached analysis results go away.
   LLVM_ABI bool invalidate(Function &F, const PreservedAnalyses &PA,
@@ -525,6 +542,7 @@ private:
   LoopInfo *LI;
   Function *F;
   SmallVector<const SCEVPredicate *, 4> Assumptions;
+  SCEVMonotonicityChecker MonChecker;
 
   class Subscript {
     const SCEV *Expr = nullptr;
