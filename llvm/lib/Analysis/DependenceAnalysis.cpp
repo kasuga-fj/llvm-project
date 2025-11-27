@@ -473,6 +473,8 @@ void SCEVMonotonicity::print(raw_ostream &OS, unsigned Depth) const {
 }
 
 bool SCEVMonotonicityChecker::isLoopInvariant(const SCEV *Expr) const {
+  if (isa<SCEVCouldNotCompute>(Expr))
+    return false;
   return !Ctx.OutermostLoop || SE->isLoopInvariant(Expr, Ctx.OutermostLoop);
 }
 
@@ -562,6 +564,16 @@ DependenceInfo::Subscript::getSingleIVConst(ScalarEvolution &SE) const {
   assert(isSingleIV(SE) && "Not a single IV subscript");
   const SCEVAddRecExpr *AR = cast<SCEVAddRecExpr>(Expr);
   return AR->getStart();
+}
+
+const Loop *DependenceInfo::Subscript::getLoop(const LoopInfo &LI) const {
+  return LI.getLoopFor(CtxI->getParent());
+}
+
+const Loop *
+DependenceInfo::Subscript::getOutermostLoop(const LoopInfo &LI) const {
+  const Loop *L = getLoop(LI);
+  return L ? L->getOutermostLoop() : nullptr;
 }
 
 // For debugging purposes. Dumps a dependence to OS.
@@ -1166,37 +1178,25 @@ static const SCEV *minusSCEVNoSignedOverflow(const SCEV *A, const SCEV *B,
   return nullptr;
 }
 
-/// Returns \p A * \p B if it guaranteed not to signed wrap. Otherwise returns
-/// nullptr. \p A and \p B must have the same integer type.
-static const SCEV *mulSCEVNoSignedOverflow(const SCEV *A, const SCEV *B,
-                                           ScalarEvolution &SE) {
-  if (SE.willNotOverflow(Instruction::Mul, /*Signed=*/true, A, B))
-    return SE.getMulExpr(A, B);
-  return nullptr;
-}
-
-/// Returns the absolute value of \p A. In the context of dependence analysis,
-/// we need an absolute value in a mathematical sense. If \p A is the signed
-/// minimum value, we cannot represent it unless extending the original type.
-/// Thus if we cannot prove that \p A is not the signed minimum value, returns
-/// nullptr.
-static const SCEV *absSCEVNoSignedOverflow(const SCEV *A, ScalarEvolution &SE) {
-  IntegerType *Ty = cast<IntegerType>(A->getType());
-  if (!Ty)
-    return nullptr;
-
-  const SCEV *SMin =
-      SE.getConstant(APInt::getSignedMinValue(Ty->getBitWidth()));
-  if (!SE.isKnownPredicate(CmpInst::ICMP_NE, A, SMin))
-    return nullptr;
-  return SE.getAbsExpr(A, /*IsNSW=*/true);
-}
-
 /// Returns true iff \p Test is enabled.
 static bool isDependenceTestEnabled(DependenceTestType Test) {
   if (EnableDependenceTest == DependenceTestType::All)
     return true;
   return EnableDependenceTest == Test;
+}
+
+bool DependenceInfo::isMonotonic(const Subscript &S,
+                                 SCEVMonotonicityDomain Domain) const {
+  SCEVMonotonicity Mon = SCEVMonotonicityChecker(SE).checkMonotonicity(
+      S.getExpr(), S.getOutermostLoop(*LI), Domain);
+  switch (Mon.getType()) {
+  case SCEVMonotonicityType::Invariant:
+  case SCEVMonotonicityType::MultivariateSignedMonotonic:
+    return true;
+  case SCEVMonotonicityType::Unknown:
+    return false;
+  }
+  llvm_unreachable("Unknown SCEVMonotonicityType");
 }
 
 // testZIV -
@@ -1255,13 +1255,18 @@ bool DependenceInfo::testZIV(const SCEV *Src, const SCEV *Dst,
 //                { > if d < 0
 //
 // Return true if dependence disproved.
-bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
-                                   const SCEV *DstConst, const Loop *CurSrcLoop,
-                                   const Loop *CurDstLoop, unsigned Level,
+bool DependenceInfo::strongSIVtest(const Subscript &Src, const Subscript &Dst,
+                                   unsigned Level,
                                    FullDependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::StrongSIV))
     return false;
 
+  const SCEV *Coeff = Src.getSingleIVCoeff(*SE);
+  const SCEV *SrcConst = Src.getSingleIVConst(*SE);
+  const SCEV *DstConst = Dst.getSingleIVConst(*SE);
+
+  assert(Coeff == Dst.getSingleIVCoeff(*SE) &&
+         "Mismatched coefficients in Strong SIV test");
   LLVM_DEBUG(dbgs() << "\tStrong SIV test\n");
   LLVM_DEBUG(dbgs() << "\t    Coeff = " << *Coeff);
   LLVM_DEBUG(dbgs() << ", " << *Coeff->getType() << "\n");
@@ -1273,40 +1278,56 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
   assert(0 < Level && Level <= CommonLevels && "level out of range");
   Level--;
 
+  if (isMonotonic(Src, SCEVMonotonicityDomain::EntireDomain) &&
+      isMonotonic(Dst, SCEVMonotonicityDomain::EntireDomain)) {
+    bool NoOverlap = [&]() {
+      const SCEV *UpperBound =
+          collectUpperBound(Src.getLoop(*LI), Coeff->getType());
+      assert(UpperBound &&
+             "Entire monotonicity requires computable upper bound");
+
+      const auto *SrcExpr = dyn_cast<SCEVAddRecExpr>(Src.getExpr());
+      const auto *DstExpr = dyn_cast<SCEVAddRecExpr>(Dst.getExpr());
+      const SCEV *Zero = SE->getZero(Coeff->getType());
+      const SCEV *SrcBegin = SrcExpr->evaluateAtIteration(Zero, *SE);
+      const SCEV *DstBegin = DstExpr->evaluateAtIteration(Zero, *SE);
+      const SCEV *SrcEnd = SrcExpr->evaluateAtIteration(UpperBound, *SE);
+      const SCEV *DstEnd = DstExpr->evaluateAtIteration(UpperBound, *SE);
+      if (SE->isKnownNonNegative(Coeff)) {
+        if (SE->isKnownPredicate(CmpInst::ICMP_SLT, SrcEnd, DstBegin) ||
+            SE->isKnownPredicate(CmpInst::ICMP_SLT, DstEnd, SrcBegin)) {
+          return true;
+        }
+      } else if (SE->isKnownNonPositive(Coeff)) {
+        if (SE->isKnownPredicate(CmpInst::ICMP_SLT, SrcBegin, DstEnd) ||
+            SE->isKnownPredicate(CmpInst::ICMP_SLT, DstBegin, SrcEnd)) {
+          return true;
+        }
+      }
+
+      return false;
+    }();
+    if (NoOverlap) {
+      // Distance greater than trip count - no dependence
+      ++StrongSIVindependence;
+      ++StrongSIVsuccesses;
+      return true;
+    }
+  }
+
   const SCEV *Delta = minusSCEVNoSignedOverflow(SrcConst, DstConst, *SE);
   if (!Delta) {
     Result.Consistent = false;
     return false;
   }
+
   LLVM_DEBUG(dbgs() << "\t    Delta = " << *Delta);
   LLVM_DEBUG(dbgs() << ", " << *Delta->getType() << "\n");
 
-  // check that |Delta| < iteration count
-  bool IsDeltaLarge = [&] {
-    const SCEV *UpperBound = collectUpperBound(CurSrcLoop, Delta->getType());
-    if (!UpperBound)
-      return false;
-
-    LLVM_DEBUG(dbgs() << "\t    UpperBound = " << *UpperBound);
-    LLVM_DEBUG(dbgs() << ", " << *UpperBound->getType() << "\n");
-    const SCEV *AbsDelta = absSCEVNoSignedOverflow(Delta, *SE);
-    const SCEV *AbsCoeff = absSCEVNoSignedOverflow(Coeff, *SE);
-    if (!AbsDelta || !AbsCoeff)
-      return false;
-    const SCEV *Product = mulSCEVNoSignedOverflow(UpperBound, AbsCoeff, *SE);
-    if (!Product)
-      return false;
-    return isKnownPredicate(CmpInst::ICMP_SGT, AbsDelta, Product);
-  }();
-  if (IsDeltaLarge) {
-    // Distance greater than trip count - no dependence
-    ++StrongSIVindependence;
-    ++StrongSIVsuccesses;
-    return true;
-  }
-
   // Can we compute distance?
-  if (isa<SCEVConstant>(Delta) && isa<SCEVConstant>(Coeff)) {
+  if (isa<SCEVConstant>(Delta) && isa<SCEVConstant>(Coeff) &&
+      isMonotonic(Src, SCEVMonotonicityDomain::EffectiveDomain) &&
+      isMonotonic(Dst, SCEVMonotonicityDomain::EffectiveDomain)) {
     APInt ConstDelta = cast<SCEVConstant>(Delta)->getAPInt();
     APInt ConstCoeff = cast<SCEVConstant>(Coeff)->getAPInt();
     APInt Distance = ConstDelta; // these need to be initialized
@@ -2311,8 +2332,7 @@ bool DependenceInfo::testSIV(const Subscript &Src, const Subscript &Dst,
     Level = mapSrcLoop(CurSrcLoop);
     bool disproven;
     if (SrcCoeff == DstCoeff)
-      disproven = strongSIVtest(SrcCoeff, SrcConst, DstConst, CurSrcLoop,
-                                CurDstLoop, Level, Result);
+      disproven = strongSIVtest(Src, Dst, Level, Result);
     else if (SrcCoeff == SE->getNegativeSCEV(DstCoeff))
       disproven = weakCrossingSIVtest(SrcCoeff, SrcConst, DstConst, CurSrcLoop,
                                       CurDstLoop, Level, Result);

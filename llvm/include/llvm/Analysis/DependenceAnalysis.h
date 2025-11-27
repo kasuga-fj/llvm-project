@@ -513,7 +513,7 @@ private:
 class DependenceInfo {
 public:
   DependenceInfo(Function *F, AAResults *AA, ScalarEvolution *SE, LoopInfo *LI)
-      : AA(AA), SE(SE), LI(LI), F(F), MonChecker(SE) {}
+      : AA(AA), SE(SE), LI(LI), F(F) {}
 
   /// Handle transitive invalidation when the cached analysis results go away.
   LLVM_ABI bool invalidate(Function &F, const PreservedAnalyses &PA,
@@ -542,7 +542,6 @@ private:
   LoopInfo *LI;
   Function *F;
   SmallVector<const SCEVPredicate *, 4> Assumptions;
-  SCEVMonotonicityChecker MonChecker;
 
   class Subscript {
     const SCEV *Expr = nullptr;
@@ -555,6 +554,10 @@ private:
     const SCEV *getExpr() const { return Expr; }
 
     Instruction *getCtxI() const { return CtxI; }
+
+    const Loop *getLoop(const LoopInfo &LI) const;
+
+    const Loop *getOutermostLoop(const LoopInfo &LI) const;
 
     bool isSingleIV(ScalarEvolution &SE) const;
 
@@ -783,9 +786,7 @@ private:
   /// Returns true if any possible dependence is disproved.
   /// If there might be a dependence, returns false.
   /// Sets appropriate direction and distance.
-  bool strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
-                     const SCEV *DstConst, const Loop *CurrentSrcLoop,
-                     const Loop *CurrentDstLoop, unsigned Level,
+  bool strongSIVtest(const Subscript &Src, const Subscript &Dst, unsigned Level,
                      FullDependence &Result) const;
 
   /// weakCrossingSIVtest - Tests the weak-crossing SIV subscript pair
@@ -990,6 +991,8 @@ private:
   /// checkDstSubscript to avoid duplicate code
   bool checkSubscript(const SCEV *Expr, const Loop *LoopNest,
                       SmallBitVector &Loops, bool IsSrc);
+
+  bool isMonotonic(const Subscript &S, SCEVMonotonicityDomain Domain) const;
 }; // class DependenceInfo
 
 /// AnalysisPass to compute dependence information in a function
