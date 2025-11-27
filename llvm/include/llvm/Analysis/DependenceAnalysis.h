@@ -755,7 +755,7 @@ private:
   /// the distance vector entry.
   /// If the dependence isn't proven to exist,
   /// marks the Result as inconsistent.
-  bool testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
+  bool testSIV(const Subscript &Src, const Subscript &Dst, unsigned &Level,
                FullDependence &Result) const;
 
   /// testRDIV - Tests the RDIV subscript pair (Src and Dst) for dependence.

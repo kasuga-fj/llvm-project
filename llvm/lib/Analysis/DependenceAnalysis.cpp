@@ -2292,12 +2292,12 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
 // they apply; they're cheaper and sometimes more precise.
 //
 // Return true if dependence disproved.
-bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
-                             FullDependence &Result) const {
-  LLVM_DEBUG(dbgs() << "    src = " << *Src << "\n");
-  LLVM_DEBUG(dbgs() << "    dst = " << *Dst << "\n");
-  const SCEVAddRecExpr *SrcAddRec = dyn_cast<SCEVAddRecExpr>(Src);
-  const SCEVAddRecExpr *DstAddRec = dyn_cast<SCEVAddRecExpr>(Dst);
+bool DependenceInfo::testSIV(const Subscript &Src, const Subscript &Dst,
+                             unsigned &Level, FullDependence &Result) const {
+  LLVM_DEBUG(dbgs() << "    src = " << *Src.getExpr() << "\n");
+  LLVM_DEBUG(dbgs() << "    dst = " << *Dst.getExpr() << "\n");
+  const SCEVAddRecExpr *SrcAddRec = dyn_cast<SCEVAddRecExpr>(Src.getExpr());
+  const SCEVAddRecExpr *DstAddRec = dyn_cast<SCEVAddRecExpr>(Dst.getExpr());
   if (SrcAddRec && DstAddRec) {
     const SCEV *SrcConst = SrcAddRec->getStart();
     const SCEV *DstConst = DstAddRec->getStart();
@@ -2319,29 +2319,29 @@ bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
     else
       disproven = exactSIVtest(SrcCoeff, DstCoeff, SrcConst, DstConst,
                                CurSrcLoop, CurDstLoop, Level, Result);
-    return disproven || gcdMIVtest(Src, Dst, Result) ||
+    return disproven || gcdMIVtest(Src.getExpr(), Dst.getExpr(), Result) ||
            symbolicRDIVtest(SrcCoeff, DstCoeff, SrcConst, DstConst, CurSrcLoop,
                             CurDstLoop);
   }
   if (SrcAddRec) {
     const SCEV *SrcConst = SrcAddRec->getStart();
     const SCEV *SrcCoeff = SrcAddRec->getStepRecurrence(*SE);
-    const SCEV *DstConst = Dst;
+    const SCEV *DstConst = Dst.getExpr();
     const Loop *CurSrcLoop = SrcAddRec->getLoop();
     Level = mapSrcLoop(CurSrcLoop);
     return weakZeroDstSIVtest(SrcCoeff, SrcConst, DstConst, CurSrcLoop,
                               CurSrcLoop, Level, Result) ||
-           gcdMIVtest(Src, Dst, Result);
+           gcdMIVtest(Src.getExpr(), Dst.getExpr(), Result);
   }
   if (DstAddRec) {
     const SCEV *DstConst = DstAddRec->getStart();
     const SCEV *DstCoeff = DstAddRec->getStepRecurrence(*SE);
-    const SCEV *SrcConst = Src;
+    const SCEV *SrcConst = Src.getExpr();
     const Loop *CurDstLoop = DstAddRec->getLoop();
     Level = mapDstLoop(CurDstLoop);
     return weakZeroSrcSIVtest(DstCoeff, SrcConst, DstConst, CurDstLoop,
                               CurDstLoop, Level, Result) ||
-           gcdMIVtest(Src, Dst, Result);
+           gcdMIVtest(Src.getExpr(), Dst.getExpr(), Result);
   }
   llvm_unreachable("SIV test expected at least one AddRec");
   return false;
@@ -3593,8 +3593,7 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     case SubscriptPair::SIV: {
       LLVM_DEBUG(dbgs() << ", SIV\n");
       unsigned Level;
-      if (testSIV(Pair[SI].Src.getExpr(), Pair[SI].Dst.getExpr(), Level,
-                  Result))
+      if (testSIV(Pair[SI].Src, Pair[SI].Dst, Level, Result))
         return nullptr;
       break;
     }
