@@ -384,8 +384,15 @@ enum class SCEVMonotonicityType {
   MultivariateSignedMonotonic,
 };
 
+/// The domain on which monotonicity is checked for F(i_1, i_2, ..., i_N).
 enum class SCEVMonotonicityDomain {
+  /// [0, BTC_0] x [0, BTC_1] x ... x [0, BTC_N].
+  /// If any BTC_k is unknown, F is not monotonic on EntireDomain.
   EntireDomain,
+
+  /// [L_0, U_0] x [L_1, U_1] x ... x [L_N, U_N].
+  /// Given N integers c_1, c_2, ..., c_N, if F(c_1, c_2, ..., c_N) is
+  /// "executed", then L_k <= c_k <= U_k must hold for all k.
   EffectiveDomain,
 };
 
