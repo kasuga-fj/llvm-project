@@ -801,10 +801,19 @@ bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
   if (!Min)
     return false;
 
-  // Over-approximate Max as Prod * I_1 + Prod (ignoring the -1).
-  if (!SE.willNotOverflow(Instruction::Add, /*IsSigned=*/true, Min,
-                          Subscripts[0]))
-    return false;
+  const SCEV *Max = Min;
+  const SCEV *SizeAcc = Sizes.back();
+  const SCEV *One = SE.getOne(Sizes[0]->getType());
+  for (const auto &[I, S] :
+       reverse(zip(drop_begin(Subscripts), drop_end(Sizes)))) {
+    // Add smax(I_k, S_{k-1} - 1) * S_{k+1} * ... * S_n
+    const SCEV *MaxIdx = SE.getSMaxExpr(I, SE.getMinusSCEV(S, One));
+    const SCEV *Add = SE.getMulExpr(MaxIdx, SizeAcc);
+    if (!SE.willNotOverflow(Instruction::Add, /*IsSigned=*/true, Max, Add))
+      return false;
+    Max = SE.getAddExpr(Max, Add);
+    SizeAcc = SE.getMulExpr(SizeAcc, S);
+  }
 
   return true;
 }
