@@ -378,21 +378,6 @@ private:
     SmallBitVector Group;
   };
 
-  struct CoefficientInfo {
-    const SCEV *Coeff;
-    const SCEV *PosPart;
-    const SCEV *NegPart;
-    const SCEV *Iterations;
-  };
-
-  struct BoundInfo {
-    const SCEV *Iterations;
-    const SCEV *Upper[8];
-    const SCEV *Lower[8];
-    unsigned char Direction;
-    unsigned char DirSet;
-  };
-
   /// Returns true if two loops have the Same iteration Space and Depth. To be
   /// more specific, two loops have SameSD if they are in the same nesting
   /// depth and have the same backedge count. SameSD stands for Same iteration
@@ -684,20 +669,6 @@ private:
   bool gcdMIVtest(const SCEV *Src, const SCEV *Dst,
                   FullDependence &Result) const;
 
-  /// banerjeeMIVtest - Tests an MIV subscript pair for dependence.
-  /// Returns true if any possible dependence is disproved.
-  /// Marks the result as inconsistent.
-  /// Computes directions.
-  bool banerjeeMIVtest(const SCEV *Src, const SCEV *Dst,
-                       const SmallBitVector &Loops,
-                       FullDependence &Result) const;
-
-  /// collectCoeffInfo - Walks through the subscript, collecting each
-  /// coefficient, the associated loop bounds, and recording its positive and
-  /// negative parts for later use.
-  CoefficientInfo *collectCoeffInfo(const SCEV *Subscript, bool SrcFlag,
-                                    const SCEV *&Constant) const;
-
   /// Given \p Expr of the form
   ///
   ///   c_0*X_0*i_0 + c_1*X_1*i_1 + ...c_n*X_n*i_n + C
@@ -716,56 +687,6 @@ private:
   bool accumulateCoefficientsGCD(const SCEV *Expr, const Loop *CurLoop,
                                  const SCEV *&CurLoopCoeff,
                                  APInt &RunningGCD) const;
-
-  /// getPositivePart - X^+ = max(X, 0).
-  const SCEV *getPositivePart(const SCEV *X) const;
-
-  /// getNegativePart - X^- = min(X, 0).
-  const SCEV *getNegativePart(const SCEV *X) const;
-
-  /// getLowerBound - Looks through all the bounds info and
-  /// computes the lower bound given the current direction settings
-  /// at each level.
-  const SCEV *getLowerBound(BoundInfo *Bound) const;
-
-  /// getUpperBound - Looks through all the bounds info and
-  /// computes the upper bound given the current direction settings
-  /// at each level.
-  const SCEV *getUpperBound(BoundInfo *Bound) const;
-
-  /// exploreDirections - Hierarchically expands the direction vector
-  /// search space, combining the directions of discovered dependences
-  /// in the DirSet field of Bound. Returns the number of distinct
-  /// dependences discovered. If the dependence is disproved,
-  /// it will return 0.
-  unsigned exploreDirections(unsigned Level, CoefficientInfo *A,
-                             CoefficientInfo *B, BoundInfo *Bound,
-                             const SmallBitVector &Loops,
-                             unsigned &DepthExpanded, const SCEV *Delta) const;
-
-  /// testBounds - Returns true iff the current bounds are plausible.
-  bool testBounds(unsigned char DirKind, unsigned Level, BoundInfo *Bound,
-                  const SCEV *Delta) const;
-
-  /// findBoundsALL - Computes the upper and lower bounds for level K
-  /// using the * direction. Records them in Bound.
-  void findBoundsALL(CoefficientInfo *A, CoefficientInfo *B, BoundInfo *Bound,
-                     unsigned K) const;
-
-  /// findBoundsLT - Computes the upper and lower bounds for level K
-  /// using the < direction. Records them in Bound.
-  void findBoundsLT(CoefficientInfo *A, CoefficientInfo *B, BoundInfo *Bound,
-                    unsigned K) const;
-
-  /// findBoundsGT - Computes the upper and lower bounds for level K
-  /// using the > direction. Records them in Bound.
-  void findBoundsGT(CoefficientInfo *A, CoefficientInfo *B, BoundInfo *Bound,
-                    unsigned K) const;
-
-  /// findBoundsEQ - Computes the upper and lower bounds for level K
-  /// using the = direction. Records them in Bound.
-  void findBoundsEQ(CoefficientInfo *A, CoefficientInfo *B, BoundInfo *Bound,
-                    unsigned K) const;
 
   /// Given a linear access function, tries to recover subscripts
   /// for each dimension of the array element access.
