@@ -377,6 +377,87 @@ private:
   friend struct SCEVVisitor<SCEVMonotonicityChecker, SCEVMonotonicity>;
 };
 
+struct OverflowSensitiveAPInt {
+  OverflowSensitiveAPInt() : Value(std::nullopt) {}
+  OverflowSensitiveAPInt(const APInt &V) : Value(V) {}
+  OverflowSensitiveAPInt(const std::optional<APInt> &V) : Value(V) {}
+
+  const std::optional<APInt> &getValue() const { return Value; }
+
+  OverflowSensitiveAPInt operator+(const OverflowSensitiveAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSensitiveAPInt();
+    bool Overflow;
+    APInt Result = Value->sadd_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSensitiveAPInt();
+    return OverflowSensitiveAPInt(Result);
+  }
+
+  OverflowSensitiveAPInt operator+(int RHS) const {
+    if (!Value)
+      return OverflowSensitiveAPInt();
+    return *this + fromInt(RHS);
+  }
+
+  OverflowSensitiveAPInt operator-(const OverflowSensitiveAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSensitiveAPInt();
+    bool Overflow;
+    APInt Result = Value->ssub_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSensitiveAPInt();
+    return OverflowSensitiveAPInt(Result);
+  }
+
+  OverflowSensitiveAPInt operator-(int RHS) const {
+    if (!Value)
+      return OverflowSensitiveAPInt();
+    return *this - fromInt(RHS);
+  }
+
+  OverflowSensitiveAPInt operator*(const OverflowSensitiveAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSensitiveAPInt();
+    bool Overflow;
+    APInt Result = Value->smul_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSensitiveAPInt();
+    return OverflowSensitiveAPInt(Result);
+  }
+
+  OverflowSensitiveAPInt operator-() const {
+    if (!Value)
+      return OverflowSensitiveAPInt();
+    if (Value->isMinSignedValue())
+      return OverflowSensitiveAPInt();
+    return OverflowSensitiveAPInt(-*Value);
+  }
+
+  operator bool() const { return Value.has_value(); }
+
+  bool operator!() const { return !Value.has_value(); }
+
+  const APInt &operator*() const {
+    assert(Value && "Value is not available.");
+    return *Value;
+  }
+
+  const APInt *operator->() const {
+    assert(Value && "Value is not available.");
+    return &*Value;
+  }
+
+private:
+  std::optional<APInt> Value;
+
+  OverflowSensitiveAPInt fromInt(uint64_t V) const {
+    assert(Value && "Value is not available.");
+    return OverflowSensitiveAPInt(
+        APInt(Value->getBitWidth(), V, /*isSigned=*/true));
+  }
+};
+
 } // anonymous namespace
 
 // Used to test the dependence analyzer.
@@ -1609,7 +1690,14 @@ static bool findGCD(unsigned Bits, const APInt &AM, const APInt &BM,
   return false;
 }
 
-static APInt floorOfQuotient(const APInt &A, const APInt &B) {
+static OverflowSensitiveAPInt
+floorOfQuotient(const OverflowSensitiveAPInt &OA,
+                const OverflowSensitiveAPInt &OB) {
+  if (!OA || !OB)
+    return OverflowSensitiveAPInt();
+
+  APInt A = *OA;
+  APInt B = *OB;
   APInt Q = A; // these need to be initialized
   APInt R = A;
   APInt::sdivrem(A, B, Q, R);
@@ -1617,20 +1705,25 @@ static APInt floorOfQuotient(const APInt &A, const APInt &B) {
     return Q;
   if ((A.sgt(0) && B.sgt(0)) || (A.slt(0) && B.slt(0)))
     return Q;
-  else
-    return Q - 1;
+  return OverflowSensitiveAPInt(Q) - 1;
 }
 
-static APInt ceilingOfQuotient(const APInt &A, const APInt &B) {
+static OverflowSensitiveAPInt
+ceilingOfQuotient(const OverflowSensitiveAPInt &OA,
+                  const OverflowSensitiveAPInt &OB) {
+  if (!OA || !OB)
+    return OverflowSensitiveAPInt();
+
+  APInt A = *OA;
+  APInt B = *OB;
   APInt Q = A; // these need to be initialized
   APInt R = A;
   APInt::sdivrem(A, B, Q, R);
   if (R == 0)
     return Q;
   if ((A.sgt(0) && B.sgt(0)) || (A.slt(0) && B.slt(0)))
-    return Q + 1;
-  else
-    return Q;
+    return OverflowSensitiveAPInt(Q) + 1;
+  return Q;
 }
 
 /// Given an affine expression of the form A*k + B, where k is an arbitrary
@@ -1662,29 +1755,26 @@ static APInt ceilingOfQuotient(const APInt &A, const APInt &B) {
 /// while working with them.
 ///
 /// Preconditions: \p A is non-zero, and we know A*k + B is non-negative.
-static std::pair<std::optional<APInt>, std::optional<APInt>>
-inferDomainOfAffine(const APInt &A, const APInt &B,
-                    const std::optional<APInt> &UB) {
-  assert(A != 0 && "A must be non-zero");
-  std::optional<APInt> TL, TU;
-  if (A.sgt(0)) {
+static std::pair<OverflowSensitiveAPInt, OverflowSensitiveAPInt>
+inferDomainOfAffine(OverflowSensitiveAPInt A, OverflowSensitiveAPInt B,
+                    OverflowSensitiveAPInt UB) {
+  assert(A && B && "A and B must be available");
+  assert(*A != 0 && "A must be non-zero");
+  OverflowSensitiveAPInt TL, TU;
+  if (A->sgt(0)) {
     TL = ceilingOfQuotient(-B, A);
-    LLVM_DEBUG(dbgs() << "\t    Possible TL = " << *TL << "\n");
+    LLVM_DEBUG(if (TL) dbgs() << "\t    Possible TL = " << *TL << "\n");
+
     // New bound check - modification to Banerjee's e3 check
-    if (UB) {
-      // TODO?: Overflow check for UB - B
-      TU = floorOfQuotient(*UB - B, A);
-      LLVM_DEBUG(dbgs() << "\t    Possible TU = " << *TU << "\n");
-    }
+    TU = floorOfQuotient(UB - B, A);
+    LLVM_DEBUG(if (TU) dbgs() << "\t    Possible TU = " << *TU << "\n");
   } else {
     TU = floorOfQuotient(-B, A);
-    LLVM_DEBUG(dbgs() << "\t    Possible TU = " << *TU << "\n");
+    LLVM_DEBUG(if (TU) dbgs() << "\t    Possible TU = " << *TU << "\n");
+
     // New bound check - modification to Banerjee's e3 check
-    if (UB) {
-      // TODO?: Overflow check for UB - B
-      TL = ceilingOfQuotient(*UB - B, A);
-      LLVM_DEBUG(dbgs() << "\t    Possible TL = " << *TL << "\n");
-    }
+    TL = ceilingOfQuotient(UB - B, A);
+    LLVM_DEBUG(if (TL) dbgs() << "\t    Possible TL = " << *TL << "\n");
   }
   return std::make_pair(TL, TU);
 }
@@ -1783,8 +1873,8 @@ bool DependenceInfo::exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
   auto [TL0, TU0] = inferDomainOfAffine(TB, TX, UM);
   auto [TL1, TU1] = inferDomainOfAffine(TA, TY, UM);
 
-  auto CreateVec = [](const std::optional<APInt> &V0,
-                      const std::optional<APInt> &V1) {
+  auto CreateVec = [](const OverflowSensitiveAPInt &V0,
+                      const OverflowSensitiveAPInt &V1) {
     SmallVector<APInt, 2> Vec;
     if (V0)
       Vec.push_back(*V0);
@@ -1814,29 +1904,31 @@ bool DependenceInfo::exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
 
   // explore directions
   unsigned NewDirection = Dependence::DVEntry::NONE;
-  APInt LowerDistance, UpperDistance;
-  // TODO: Overflow check may be needed.
+  OverflowSensitiveAPInt LowerDistance, UpperDistance;
+  OverflowSensitiveAPInt OTY(TY), OTX(TX), OTA(TA), OTB(TB), OTL(TL), OTU(TU);
   if (TA.sgt(TB)) {
-    LowerDistance = (TY - TX) + (TA - TB) * TL;
-    UpperDistance = (TY - TX) + (TA - TB) * TU;
+    LowerDistance = (OTY - OTX) + (OTA - OTB) * OTL;
+    UpperDistance = (OTY - OTX) + (OTA - OTB) * OTU;
   } else {
-    LowerDistance = (TY - TX) + (TA - TB) * TU;
-    UpperDistance = (TY - TX) + (TA - TB) * TL;
+    LowerDistance = (OTY - OTX) + (OTA - OTB) * OTU;
+    UpperDistance = (OTY - OTX) + (OTA - OTB) * OTL;
   }
 
-  LLVM_DEBUG(dbgs() << "\t    LowerDistance = " << LowerDistance << "\n");
-  LLVM_DEBUG(dbgs() << "\t    UpperDistance = " << UpperDistance << "\n");
+  if (!LowerDistance || !UpperDistance)
+    return false;
 
-  APInt Zero(Bits, 0, true);
-  if (LowerDistance.sle(Zero) && UpperDistance.sge(Zero)) {
+  LLVM_DEBUG(dbgs() << "\t    LowerDistance = " << *LowerDistance << "\n");
+  LLVM_DEBUG(dbgs() << "\t    UpperDistance = " << *UpperDistance << "\n");
+
+  if (LowerDistance->sle(0) && UpperDistance->sge(0)) {
     NewDirection |= Dependence::DVEntry::EQ;
     ++ExactSIVsuccesses;
   }
-  if (LowerDistance.slt(0)) {
+  if (LowerDistance->slt(0)) {
     NewDirection |= Dependence::DVEntry::GT;
     ++ExactSIVsuccesses;
   }
-  if (UpperDistance.sgt(0)) {
+  if (UpperDistance->sgt(0)) {
     NewDirection |= Dependence::DVEntry::LT;
     ++ExactSIVsuccesses;
   }
@@ -2172,8 +2264,8 @@ bool DependenceInfo::exactRDIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
   LLVM_DEBUG(dbgs() << "\t    TA = " << TA << "\n");
   LLVM_DEBUG(dbgs() << "\t    TB = " << TB << "\n");
 
-  auto CreateVec = [](const std::optional<APInt> &V0,
-                      const std::optional<APInt> &V1) {
+  auto CreateVec = [](const OverflowSensitiveAPInt &V0,
+                      const OverflowSensitiveAPInt &V1) {
     SmallVector<APInt, 2> Vec;
     if (V0)
       Vec.push_back(*V0);
