@@ -1561,52 +1561,56 @@ const DenseMap<const Loop *, unsigned> &CacheCostManager::getCostMap() {
   return CostMap;
 }
 
+static const SCEV *getAccessFn(Instruction &I, ScalarEvolution &SE) {
+  Value *Ptr = [&] {
+    if (LoadInst *LI = dyn_cast<LoadInst>(&I))
+      if (LI->isSimple())
+        return LI->getPointerOperand();
+    if (StoreInst *SI = dyn_cast<StoreInst>(&I))
+      if (SI->isSimple())
+        return SI->getPointerOperand();
+    return (Value *)nullptr;
+  }();
+
+  if (!Ptr)
+    return nullptr;
+  return SE.removePointerBase(SE.getSCEV(Ptr));
+}
+
+static void getCoeff(const SCEV *S, const Loop *Outer, const Loop *Inner,
+                     std::optional<const SCEV *> &OuterCoeff,
+                     std::optional<const SCEV *> &InnerCoeff,
+                     ScalarEvolution &SE) {
+  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S);
+  if (!AR)
+    return;
+  if (AR->getLoop() == Outer) {
+    OuterCoeff = AR->getStepRecurrence(SE);
+  } else if (AR->getLoop() == Inner) {
+    InnerCoeff = AR->getStepRecurrence(SE);
+  }
+  getCoeff(AR->getStart(), Outer, Inner, OuterCoeff, InnerCoeff, SE);
+}
+
 int LoopInterchangeProfitability::getInstrOrderCost() {
   unsigned GoodOrder, BadOrder;
   BadOrder = GoodOrder = 0;
   for (BasicBlock *BB : InnerLoop->blocks()) {
     for (Instruction &Ins : *BB) {
-      if (const GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&Ins)) {
-        bool FoundInnerInduction = false;
-        bool FoundOuterInduction = false;
-        for (Value *Op : GEP->operands()) {
-          // Skip operands that are not SCEV-able.
-          if (!SE->isSCEVable(Op->getType()))
-            continue;
-
-          const SCEV *OperandVal = SE->getSCEV(Op);
-          const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(OperandVal);
-          if (!AR)
-            continue;
-
-          // If we find the inner induction after an outer induction e.g.
-          // for(int i=0;i<N;i++)
-          //   for(int j=0;j<N;j++)
-          //     A[i][j] = A[i-1][j-1]+k;
-          // then it is a good order.
-          if (AR->getLoop() == InnerLoop) {
-            // We found an InnerLoop induction after OuterLoop induction. It is
-            // a good order.
-            FoundInnerInduction = true;
-            if (FoundOuterInduction) {
-              GoodOrder++;
-              break;
-            }
-          }
-          // If we find the outer induction after an inner induction e.g.
-          // for(int i=0;i<N;i++)
-          //   for(int j=0;j<N;j++)
-          //     A[j][i] = A[j-1][i-1]+k;
-          // then it is a bad order.
-          if (AR->getLoop() == OuterLoop) {
-            // We found an OuterLoop induction after InnerLoop induction. It is
-            // a bad order.
-            FoundOuterInduction = true;
-            if (FoundInnerInduction) {
-              BadOrder++;
-              break;
-            }
-          }
+      if (const SCEV *AccessFn = getAccessFn(Ins, *SE)) {
+        const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(AccessFn);
+        if (!AR)
+          continue;
+        std::optional<const SCEV *> Outer, Inner;
+        getCoeff(AccessFn, OuterLoop, InnerLoop, Outer, Inner, *SE);
+        if (!Inner.has_value()) {
+          GoodOrder++;
+        } else if (!Outer.has_value()) {
+          BadOrder++;
+        } else if (SE->isKnownPredicate(ICmpInst::ICMP_SLE, *Inner, *Outer)) {
+          GoodOrder++;
+        } else if (SE->isKnownPredicate(ICmpInst::ICMP_SLT, *Outer, *Inner)) {
+          BadOrder++;
         }
       }
     }
