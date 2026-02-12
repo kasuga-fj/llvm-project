@@ -129,7 +129,7 @@ enum class DependenceTestType {
 } // anonymous namespace
 
 static cl::opt<DependenceTestType> EnableDependenceTest(
-    "da-enable-dependence-test", cl::init(DependenceTestType::All),
+    "da-enable-dependence-test", cl::init(DependenceTestType::StrongSIV),
     cl::ReallyHidden,
     cl::desc("Run only specified dependence test routine and disable others. "
              "The purpose is mainly to exclude the influence of other "
@@ -2421,6 +2421,8 @@ bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
   const SCEVAddRecExpr *SrcAddRec = dyn_cast<SCEVAddRecExpr>(Src);
   const SCEVAddRecExpr *DstAddRec = dyn_cast<SCEVAddRecExpr>(Dst);
   if (SrcAddRec && DstAddRec) {
+    if (!SrcAddRec->hasNoSignedWrap() || !DstAddRec->hasNoSignedWrap())
+      return false;
     const SCEV *SrcConst = SrcAddRec->getStart();
     const SCEV *DstConst = DstAddRec->getStart();
     const SCEV *SrcCoeff = SrcAddRec->getStepRecurrence(*SE);
