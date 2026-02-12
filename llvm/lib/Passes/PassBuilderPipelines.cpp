@@ -1597,8 +1597,7 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   //        in the simplification pipeline.
   LPM.addPass(LoopDeletionPass());
 
-  if (PTO.LoopInterchange)
-    LPM.addPass(LoopInterchangePass());
+  LPM.addPass(LoopInterchangePass());
 
   OptimizePM.addPass(
       createFunctionToLoopPassAdaptor(std::move(LPM), /*UseMemorySSA=*/false));
