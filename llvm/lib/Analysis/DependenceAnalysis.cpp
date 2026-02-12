@@ -1273,6 +1273,9 @@ static const SCEV *absSCEVNoSignedOverflow(const SCEV *A, ScalarEvolution &SE) {
 
 /// Returns true iff \p Test is enabled.
 static bool isDependenceTestEnabled(DependenceTestType Test) {
+  if (Test == DependenceTestType::BanerjeeMIV ||
+      Test == DependenceTestType::GCDMIV)
+    return false;
   if (EnableDependenceTest == DependenceTestType::All)
     return true;
   return EnableDependenceTest == Test;
