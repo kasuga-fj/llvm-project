@@ -108,8 +108,8 @@ static cl::list<RuleTy> Profitabilities(
     cl::MiscFlags::CommaSeparated, cl::Hidden,
     cl::desc("List of profitability heuristics to be used. They are applied in "
              "the given order"),
-    cl::list_init<RuleTy>({RuleTy::PerLoopCacheAnalysis,
-                           RuleTy::PerInstrOrderCost,
+    cl::list_init<RuleTy>({RuleTy::PerInstrOrderCost,
+                           RuleTy::PerLoopCacheAnalysis,
                            RuleTy::ForVectorization}),
     cl::values(clEnumValN(RuleTy::PerLoopCacheAnalysis, "cache",
                           "Prioritize loop cache cost"),
