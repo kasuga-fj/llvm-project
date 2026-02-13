@@ -129,7 +129,7 @@ enum class DependenceTestType {
 } // anonymous namespace
 
 static cl::opt<DependenceTestType> EnableDependenceTest(
-    "da-enable-dependence-test", cl::init(DependenceTestType::StrongSIV),
+    "da-enable-dependence-test", cl::init(DependenceTestType::All),
     cl::ReallyHidden,
     cl::desc("Run only specified dependence test routine and disable others. "
              "The purpose is mainly to exclude the influence of other "
