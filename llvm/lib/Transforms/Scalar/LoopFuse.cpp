@@ -1265,12 +1265,12 @@ private:
       // Iterating over the outer levels.
       for (unsigned Level = 1; Level <= std::min(CurLoopLevel - 1, Levels);
            ++Level) {
-        unsigned Direction = DepResult->getDirection(Level, false);
+        auto Direction = DepResult->getDirection(Level, false);
 
         // Check if the direction vector does not include equality. If an outer
         // loop has a non-equal direction, outer indicies are different and it
         // is safe to fuse.
-        if (!(Direction & Dependence::DVEntry::EQ)) {
+        if (!(Direction & Dependence::DVEntry::EQ())) {
           LLVM_DEBUG(dbgs() << "Safe to fuse due to non-equal acceses in the "
                                "outer loops\n");
           NumDA++;
@@ -1280,7 +1280,7 @@ private:
 
       assert(CurLoopLevel > Levels && "Fusion candidates are not separated");
 
-      unsigned CurDir = DepResult->getDirection(CurLoopLevel, true);
+      auto CurDir = DepResult->getDirection(CurLoopLevel, true);
 
       // Check if the direction vector does not include greater direction. In
       // that case, the dependency is not a backward loop-carried and is legal
@@ -1289,7 +1289,7 @@ private:
       //        A[i] = ...;
       //    for (int i = 0; i < n; i++)
       //        ... = A[i-1];
-      if (!(CurDir & Dependence::DVEntry::GT)) {
+      if (!(CurDir & Dependence::DVEntry::GT())) {
         LLVM_DEBUG(dbgs() << "Safe to fuse with no backward loop-carried "
                              "dependency\n");
         NumDA++;

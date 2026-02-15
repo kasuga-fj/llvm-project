@@ -244,12 +244,12 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
           // `DVEntry::GE`.
           // TODO: Use of fine-grained expressions allows for more accurate
           // analysis.
-          unsigned Dir = D->getDirection(II);
-          if (Dir == Dependence::DVEntry::LT)
+          auto Dir = D->getDirection(II);
+          if (Dir == Dependence::DVEntry::LT())
             Direction = '<';
-          else if (Dir == Dependence::DVEntry::GT)
+          else if (Dir == Dependence::DVEntry::GT())
             Direction = '>';
-          else if (Dir == Dependence::DVEntry::EQ)
+          else if (Dir == Dependence::DVEntry::EQ())
             Direction = '=';
           else
             Direction = '*';

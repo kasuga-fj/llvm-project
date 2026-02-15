@@ -79,6 +79,64 @@ public:
       : Src(Source), Dst(Destination), Assumptions(A) {}
   virtual ~Dependence() = default;
 
+  struct DVEntryAux {
+    bool Lt;
+    bool Eq;
+    bool Gt;
+
+    constexpr DVEntryAux(bool Lt = true, bool Eq = true, bool Gt = true)
+        : Lt(Lt), Eq(Eq), Gt(Gt) {}
+
+    constexpr DVEntryAux &operator&=(const DVEntryAux &Other) {
+      Lt &= Other.Lt;
+      Eq &= Other.Eq;
+      Gt &= Other.Gt;
+      return *this;
+    }
+
+    constexpr DVEntryAux operator&(const DVEntryAux &Other) const {
+      DVEntryAux Result = *this;
+      Result &= Other;
+      return Result;
+    }
+
+    constexpr DVEntryAux &operator|=(const DVEntryAux &Other) {
+      Lt |= Other.Lt;
+      Eq |= Other.Eq;
+      Gt |= Other.Gt;
+      return *this;
+    }
+
+    constexpr DVEntryAux operator|(const DVEntryAux &Other) const {
+      DVEntryAux Result = *this;
+      Result |= Other;
+      return Result;
+    }
+
+    constexpr DVEntryAux operator~() const {
+      return DVEntryAux(!Lt, !Eq, !Gt);
+    }
+
+    constexpr bool operator==(const DVEntryAux &Other) const {
+      return Lt == Other.Lt && Eq == Other.Eq && Gt == Other.Gt;
+    }
+
+    constexpr bool operator!=(const DVEntryAux &Other) const { return !(*this == Other); }
+
+    constexpr operator bool() const { return Lt || Eq || Gt; }
+
+    constexpr operator long() const {
+      int Result = 0;
+      if (Lt)
+        Result |= 1;
+      if (Eq)
+        Result |= 2;
+      if (Gt)
+        Result |= 4;
+      return Result;
+    }
+  };
+
   /// Dependence::DVEntry - Each level in the distance/direction vector
   /// has a direction (or perhaps a union of several directions), and
   /// perhaps a distance.
@@ -93,23 +151,22 @@ public:
   ///      }
   ///    }
   struct DVEntry {
-    enum : unsigned char {
-      NONE = 0,
-      LT = 1,
-      EQ = 2,
-      LE = 3,
-      GT = 4,
-      NE = 5,
-      GE = 6,
-      ALL = 7
-    };
-    unsigned char Direction : 3; // Init to ALL, then refine.
-    bool Scalar : 1;             // Init to true.
-    bool PeelFirst : 1; // Peeling the first iteration will break dependence.
-    bool PeelLast : 1;  // Peeling the last iteration will break the dependence.
+    DVEntryAux Direction; // Init to ALL, then refine.
+    bool Scalar;             // Init to true.
+    bool PeelFirst; // Peeling the first iteration will break dependence.
+    bool PeelLast;  // Peeling the last iteration will break the dependence.
     const SCEV *Distance = nullptr; // NULL implies no distance available.
     DVEntry()
-        : Direction(ALL), Scalar(true), PeelFirst(false), PeelLast(false) {}
+        : Direction(), Scalar(true), PeelFirst(false), PeelLast(false) {}
+
+    constexpr static DVEntryAux NONE() { return DVEntryAux(false, false, false); }
+    constexpr static DVEntryAux LT() { return DVEntryAux(true, false, false); }
+    constexpr static DVEntryAux EQ() { return DVEntryAux(false, true, false); }
+    constexpr static DVEntryAux LE() { return DVEntryAux(true, true, false); }
+    constexpr static DVEntryAux GT() { return DVEntryAux(false, false, true); }
+    constexpr static DVEntryAux NE() { return DVEntryAux(true, false, true); }
+    constexpr static DVEntryAux GE() { return DVEntryAux(false, true, true); }
+    constexpr static DVEntryAux ALL() { return DVEntryAux(true, true, true); }
   };
 
   /// getSrc - Returns the source instruction for this dependence.
@@ -162,8 +219,8 @@ public:
 
   /// getDirection - Returns the direction associated with a particular
   /// common or SameSD level.
-  virtual unsigned getDirection(unsigned Level, bool SameSD = false) const {
-    return DVEntry::ALL;
+  virtual DVEntryAux getDirection(unsigned Level, bool SameSD = false) const {
+    return DVEntry::ALL();
   }
 
   /// getDistance - Returns the distance (or NULL) associated with a
@@ -288,7 +345,7 @@ public:
 
   /// getDirection - Returns the direction associated with a particular
   /// common or SameSD level.
-  unsigned getDirection(unsigned Level, bool SameSD = false) const override;
+  DVEntryAux getDirection(unsigned Level, bool SameSD = false) const override;
 
   /// getDistance - Returns the distance (or NULL) associated with a
   /// particular common or SameSD level.
@@ -384,8 +441,8 @@ private:
     const SCEV *Iterations;
     const SCEV *Upper[8];
     const SCEV *Lower[8];
-    unsigned char Direction;
-    unsigned char DirSet;
+    Dependence::DVEntryAux Direction;
+    Dependence::DVEntryAux DirSet;
   };
 
   /// Returns true if two loops have the Same iteration Space and Depth. To be
@@ -721,7 +778,7 @@ private:
                              unsigned &DepthExpanded, const SCEV *Delta) const;
 
   /// testBounds - Returns true iff the current bounds are plausible.
-  bool testBounds(unsigned char DirKind, unsigned Level, BoundInfo *Bound,
+  bool testBounds(Dependence::DVEntryAux DirKind, unsigned Level, BoundInfo *Bound,
                   const SCEV *Delta) const;
 
   /// findBoundsALL - Computes the upper and lower bounds for level K
