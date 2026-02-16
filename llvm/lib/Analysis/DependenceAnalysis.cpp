@@ -1401,7 +1401,6 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
       ++StrongSIVsuccesses;
       return true;
     }
-#if 0
     Result.DV[Level].Distance = SE->getConstant(Distance);
     if (Distance.sgt(0))
       Result.DV[Level].Direction &= Dependence::DVEntry::LT;
@@ -1409,18 +1408,6 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
       Result.DV[Level].Direction &= Dependence::DVEntry::GT;
     else
       Result.DV[Level].Direction &= Dependence::DVEntry::EQ;
-#else
-    if (Distance.sgt(0)) {
-      Result.DV[Level].Eq = false;
-      Result.DV[Level].Gt = false;
-    } else if (Distance.slt(0)) {
-      Result.DV[Level].Lt = false;
-      Result.DV[Level].Eq = false;
-    } else {
-      Result.DV[Level].Lt = false;
-      Result.DV[Level].Gt = false;
-    }
-#endif
     ++StrongSIVsuccesses;
   } else if (Delta->isZero()) {
     // Check if coefficient could be zero. If so, 0/0 is undefined and we

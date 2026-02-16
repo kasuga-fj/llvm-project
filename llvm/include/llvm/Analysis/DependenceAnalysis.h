@@ -58,9 +58,12 @@ struct DVEntryAux : public std::tuple<bool, bool, bool> {
   using std::tuple<bool, bool, bool>::tuple;
 
   constexpr DVEntryAux &operator&=(const DVEntryAux &RHS) {
-    std::get<0>(*this) &= std::get<0>(RHS);
-    std::get<1>(*this) &= std::get<1>(RHS);
-    std::get<2>(*this) &= std::get<2>(RHS);
+    if (!std::get<0>(RHS))
+      std::get<0>(*this) = false;
+    if (!std::get<1>(RHS))
+      std::get<1>(*this) = false;
+    if (!std::get<2>(RHS))
+      std::get<2>(*this) = false;
     return *this;
   }
 
@@ -71,9 +74,12 @@ struct DVEntryAux : public std::tuple<bool, bool, bool> {
   }
 
   constexpr DVEntryAux &operator|=(const DVEntryAux &RHS) {
-    std::get<0>(*this) |= std::get<0>(RHS);
-    std::get<1>(*this) |= std::get<1>(RHS);
-    std::get<2>(*this) |= std::get<2>(RHS);
+    if (std::get<0>(RHS))
+      std::get<0>(*this) = true;
+    if (std::get<1>(RHS))
+      std::get<1>(*this) = true;
+    if (std::get<2>(RHS))
+      std::get<2>(*this) = true;
     return *this;
   }
 
@@ -156,9 +162,6 @@ public:
         : Scalar(true), PeelFirst(false), PeelLast(false), Direction(true, true, true) {}
 
     DVEntryAux Direction; // Init to ALL, then refine.
-    bool Lt = true;
-    bool Eq = true;
-    bool Gt = true;
     static constexpr DVEntryAux NONE{false, false, false};
     static constexpr DVEntryAux LT{true, false, false};
     static constexpr DVEntryAux EQ{false, true, false};
