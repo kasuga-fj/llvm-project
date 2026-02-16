@@ -54,67 +54,6 @@ class LoopInfo;
 class SCEVConstant;
 class raw_ostream;
 
-struct DVEntryAux : public std::tuple<bool, bool, bool> {
-  using std::tuple<bool, bool, bool>::tuple;
-
-  constexpr DVEntryAux &operator&=(const DVEntryAux &RHS) {
-    if (!std::get<0>(RHS))
-      std::get<0>(*this) = false;
-    if (!std::get<1>(RHS))
-      std::get<1>(*this) = false;
-    if (!std::get<2>(RHS))
-      std::get<2>(*this) = false;
-    return *this;
-  }
-
-  constexpr DVEntryAux operator&(const DVEntryAux &RHS) const {
-    DVEntryAux Result = *this;
-    Result &= RHS;
-    return Result;
-  }
-
-  constexpr DVEntryAux &operator|=(const DVEntryAux &RHS) {
-    if (std::get<0>(RHS))
-      std::get<0>(*this) = true;
-    if (std::get<1>(RHS))
-      std::get<1>(*this) = true;
-    if (std::get<2>(RHS))
-      std::get<2>(*this) = true;
-    return *this;
-  }
-
-  constexpr DVEntryAux operator|(const DVEntryAux &RHS) const {
-    DVEntryAux Result = *this;
-    Result |= RHS;
-    return Result;
-  }
-
-  constexpr DVEntryAux operator~() const {
-    return DVEntryAux(!std::get<0>(*this), !std::get<1>(*this), !std::get<2>(*this));
-  }
-
-  constexpr bool operator==(const DVEntryAux &RHS) const {
-    return std::get<0>(*this) == std::get<0>(RHS) && 
-           std::get<1>(*this) == std::get<1>(RHS) &&
-           std::get<2>(*this) == std::get<2>(RHS);
-  }
-
-  constexpr bool operator!=(const DVEntryAux &RHS) const { return !(*this == RHS); }
-
-  constexpr operator bool() const { return std::get<0>(*this) || std::get<1>(*this) || std::get<2>(*this); }
-
-  constexpr operator long() const {
-    int Result = 0;
-    if (std::get<0>(*this))
-      Result |= 1;
-    if (std::get<1>(*this))
-      Result |= 2;
-    if (std::get<2>(*this))
-      Result |= 4;
-    return Result;
-  }
-};
-
 /// Dependence - This class represents a dependence between two memory
 /// memory references in a function. It contains minimal information and
 /// is used in the very common situation where the compiler is unable to
@@ -129,48 +68,186 @@ struct DVEntryAux : public std::tuple<bool, bool, bool> {
 /// if successor edges for its source instruction. These sets are represented
 /// as singly-linked lists, with the "next" fields stored in the dependence
 /// itelf.
+// class LLVM_ABI Dependence {
+// protected:
+//   Dependence(Dependence &&) = default;
+//   Dependence &operator=(Dependence &&) = default;
+// 
+// public:
+//   Dependence(Instruction *Source, Instruction *Destination,
+//              const SCEVUnionPredicate &A)
+//       : Src(Source), Dst(Destination), Assumptions(A) {}
+//   virtual ~Dependence() = default;
+// 
+//   /// Dependence::DVEntry - Each level in the distance/direction vector
+//   /// has a direction (or perhaps a union of several directions), and
+//   /// perhaps a distance.
+//   /// The dependency information could be across a single loop level or across
+//   /// two separate levels that have the same trip count and nesting depth,
+//   /// which helps to provide information for loop fusion candidation.
+//   /// For example, loops b and c have the same iteration count and depth:
+//   ///    for (a = ...) {
+//   ///      for (b = 0; b < 10; b++) {
+//   ///      }
+//   ///      for (c = 0; c < 10; c++) {
+//   ///      }
+//   ///    }
+//   struct DVEntry {
+//     enum : unsigned char {
+//       NONE = 0,
+//       LT = 1,
+//       EQ = 2,
+//       LE = 3,
+//       GT = 4,
+//       NE = 5,
+//       GE = 6,
+//       ALL = 7
+//     };
+//     unsigned char Direction : 3; // Init to ALL, then refine.
+//     bool Scalar : 1;             // Init to true.
+//     bool PeelFirst : 1; // Peeling the first iteration will break dependence.
+//     bool PeelLast : 1;  // Peeling the last iteration will break the dependence.
+//     const SCEV *Distance = nullptr; // NULL implies no distance available.
+//     DVEntry()
+//         : Direction(ALL), Scalar(true), PeelFirst(false), PeelLast(false) {}
+//   };
+// 
+//   /// isLoopIndependent - Returns true if this is a loop-independent
+//   /// dependence.
+//   virtual bool isLoopIndependent() const { return true; }
+// 
+//   /// isConfused - Returns true if this dependence is confused
+//   /// (the compiler understands nothing and makes worst-case assumptions).
+//   virtual bool isConfused() const { return true; }
+// 
+//   /// isConsistent - Returns true if this dependence is consistent
+//   /// (occurs every time the source and destination are executed).
+//   virtual bool isConsistent() const { return false; }
+// 
+//   /// getLevels - Returns the number of common loops surrounding the
+//   /// source and destination of the dependence.
+//   virtual unsigned getLevels() const { return 0; }
+// 
+//   /// getSameSDLevels - Returns the number of separate SameSD loops surrounding
+//   /// the source and destination of the dependence.
+//   virtual unsigned getSameSDLevels() const { return 0; }
+// 
+//   /// getDVEntry - Returns the DV entry associated with a regular or a
+//   /// SameSD level
+//   DVEntry getDVEntry(unsigned Level, bool IsSameSD) const;
+// 
+//   /// getDirection - Returns the direction associated with a particular
+//   /// common or SameSD level.
+//   virtual unsigned getDirection(unsigned Level, bool SameSD = false) const {
+//     return DVEntry::ALL;
+//   }
+// 
+//   /// getDistance - Returns the distance (or NULL) associated with a
+//   /// particular common or SameSD level.
+//   virtual const SCEV *getDistance(unsigned Level, bool SameSD = false) const {
+//     return nullptr;
+//   }
+// 
+//   /// Check if the direction vector is negative. A negative direction
+//   /// vector means Src and Dst are reversed in the actual program.
+//   virtual bool isDirectionNegative() const { return false; }
+// 
+//   /// If the direction vector is negative, normalize the direction
+//   /// vector to make it non-negative. Normalization is done by reversing
+//   /// Src and Dst, plus reversing the dependence directions and distances
+//   /// in the vector.
+//   virtual bool normalize(ScalarEvolution *SE) { return false; }
+// 
+//   /// isPeelFirst - Returns true if peeling the first iteration from
+//   /// this regular or SameSD loop level will break this dependence.
+//   virtual bool isPeelFirst(unsigned Level, bool SameSD = false) const {
+//     return false;
+//   }
+// 
+//   /// isPeelLast - Returns true if peeling the last iteration from
+//   /// this regular or SameSD loop level will break this dependence.
+//   virtual bool isPeelLast(unsigned Level, bool SameSD = false) const {
+//     return false;
+//   }
+// 
+//   /// inSameSDLoops - Returns true if this level is an SameSD level, i.e.,
+//   /// performed across two separate loop nests that have the Same Iteration and
+//   /// Depth.
+//   virtual bool inSameSDLoops(unsigned Level) const { return false; }
+// 
+//   /// isScalar - Returns true if a particular regular or SameSD level is
+//   /// scalar; that is, if no subscript in the source or destination mention
+//   /// the induction variable associated with the loop at this level.
+//   virtual bool isScalar(unsigned Level, bool SameSD = false) const;
+// 
+//   /// getNextPredecessor - Returns the value of the NextPredecessor field.
+//   const Dependence *getNextPredecessor() const { return NextPredecessor; }
+// 
+//   /// getNextSuccessor - Returns the value of the NextSuccessor field.
+//   const Dependence *getNextSuccessor() const { return NextSuccessor; }
+// 
+//   /// setNextPredecessor - Sets the value of the NextPredecessor
+//   /// field.
+//   void setNextPredecessor(const Dependence *pred) { NextPredecessor = pred; }
+// 
+//   /// setNextSuccessor - Sets the value of the NextSuccessor field.
+//   void setNextSuccessor(const Dependence *succ) { NextSuccessor = succ; }
+// 
+//   /// getRuntimeAssumptions - Returns the runtime assumptions under which this
+//   /// Dependence relation is valid.
+//   SCEVUnionPredicate getRuntimeAssumptions() const { return Assumptions; }
+// 
+//   /// dump - For debugging purposes, dumps a dependence to OS.
+//   void dump(raw_ostream &OS) const;
+// 
+//   /// dumpImp - For debugging purposes. Dumps a dependence to OS with or
+//   /// without considering the SameSD levels.
+//   void dumpImp(raw_ostream &OS, bool IsSameSD = false) const;
+// 
+// protected:
+// 
+// private:
+//   Instruction *Src, *Dst;
+//   SCEVUnionPredicate Assumptions;
+//   const Dependence *NextPredecessor = nullptr, *NextSuccessor = nullptr;
+//   friend class DependenceInfo;
+// };
+
+/// FullDependence - This class represents a dependence between two memory
+/// references in a function. It contains detailed information about the
+/// dependence (direction vectors, etc.) and is used when the compiler is
+/// able to accurately analyze the interaction of the references; that is,
+/// it is not a confused dependence (see Dependence). In most cases
+/// (for output, flow, and anti dependences), the dependence implies an
+/// ordering, where the source must precede the destination; in contrast,
+/// input dependences are unordered.
 class LLVM_ABI Dependence {
-protected:
-  Dependence(Dependence &&) = default;
-  Dependence &operator=(Dependence &&) = default;
-
 public:
-  Dependence(Instruction *Source, Instruction *Destination,
-             const SCEVUnionPredicate &A)
-      : Src(Source), Dst(Destination), Assumptions(A) {}
-  virtual ~Dependence() = default;
-
-  /// Dependence::DVEntry - Each level in the distance/direction vector
-  /// has a direction (or perhaps a union of several directions), and
-  /// perhaps a distance.
-  /// The dependency information could be across a single loop level or across
-  /// two separate levels that have the same trip count and nesting depth,
-  /// which helps to provide information for loop fusion candidation.
-  /// For example, loops b and c have the same iteration count and depth:
-  ///    for (a = ...) {
-  ///      for (b = 0; b < 10; b++) {
-  ///      }
-  ///      for (c = 0; c < 10; c++) {
-  ///      }
-  ///    }
   struct DVEntry {
-    bool Scalar;             // Init to true.
-    bool PeelFirst; // Peeling the first iteration will break dependence.
-    bool PeelLast;  // Peeling the last iteration will break the dependence.
+    enum : unsigned char {
+      NONE = 0,
+      LT = 1,
+      EQ = 2,
+      LE = 3,
+      GT = 4,
+      NE = 5,
+      GE = 6,
+      ALL = 7
+    };
+    unsigned char Direction : 3; // Init to ALL, then refine.
+    bool Scalar : 1;             // Init to true.
+    bool PeelFirst : 1; // Peeling the first iteration will break dependence.
+    bool PeelLast : 1;  // Peeling the last iteration will break the dependence.
     const SCEV *Distance = nullptr; // NULL implies no distance available.
     DVEntry()
-        : Scalar(true), PeelFirst(false), PeelLast(false), Direction(true, true, true) {}
-
-    DVEntryAux Direction; // Init to ALL, then refine.
-    static constexpr DVEntryAux NONE{false, false, false};
-    static constexpr DVEntryAux LT{true, false, false};
-    static constexpr DVEntryAux EQ{false, true, false};
-    static constexpr DVEntryAux LE{true, true, false};
-    static constexpr DVEntryAux GT{false, false, true};
-    static constexpr DVEntryAux NE{true, false, true};
-    static constexpr DVEntryAux GE{false, true, true};
-    static constexpr DVEntryAux ALL{true, true, true};
+        : Direction(ALL), Scalar(true), PeelFirst(false), PeelLast(false) {}
   };
+  Dependence(Instruction *Source, Instruction *Destination,
+                 const SCEVUnionPredicate &Assumes,
+                 bool PossiblyLoopIndependent, unsigned Levels);
+
+  Dependence(Instruction *Source, Instruction *Destination, const SCEVUnionPredicate &Assumes)
+      : Dependence(Source, Destination, Assumes, false, 0) {}
 
   /// getSrc - Returns the source instruction for this dependence.
   Instruction *getSrc() const { return Src; }
@@ -195,74 +272,6 @@ public:
 
   /// isUnordered - Returns true if dependence is Input
   bool isUnordered() const { return isInput(); }
-
-  /// isLoopIndependent - Returns true if this is a loop-independent
-  /// dependence.
-  virtual bool isLoopIndependent() const { return true; }
-
-  /// isConfused - Returns true if this dependence is confused
-  /// (the compiler understands nothing and makes worst-case assumptions).
-  virtual bool isConfused() const { return true; }
-
-  /// isConsistent - Returns true if this dependence is consistent
-  /// (occurs every time the source and destination are executed).
-  virtual bool isConsistent() const { return false; }
-
-  /// getLevels - Returns the number of common loops surrounding the
-  /// source and destination of the dependence.
-  virtual unsigned getLevels() const { return 0; }
-
-  /// getSameSDLevels - Returns the number of separate SameSD loops surrounding
-  /// the source and destination of the dependence.
-  virtual unsigned getSameSDLevels() const { return 0; }
-
-  /// getDVEntry - Returns the DV entry associated with a regular or a
-  /// SameSD level
-  DVEntry getDVEntry(unsigned Level, bool IsSameSD) const;
-
-  /// getDirection - Returns the direction associated with a particular
-  /// common or SameSD level.
-  virtual DVEntryAux getDirection(unsigned Level, bool SameSD = false) const {
-    return DVEntry::ALL;
-  }
-
-  /// getDistance - Returns the distance (or NULL) associated with a
-  /// particular common or SameSD level.
-  virtual const SCEV *getDistance(unsigned Level, bool SameSD = false) const {
-    return nullptr;
-  }
-
-  /// Check if the direction vector is negative. A negative direction
-  /// vector means Src and Dst are reversed in the actual program.
-  virtual bool isDirectionNegative() const { return false; }
-
-  /// If the direction vector is negative, normalize the direction
-  /// vector to make it non-negative. Normalization is done by reversing
-  /// Src and Dst, plus reversing the dependence directions and distances
-  /// in the vector.
-  virtual bool normalize(ScalarEvolution *SE) { return false; }
-
-  /// isPeelFirst - Returns true if peeling the first iteration from
-  /// this regular or SameSD loop level will break this dependence.
-  virtual bool isPeelFirst(unsigned Level, bool SameSD = false) const {
-    return false;
-  }
-
-  /// isPeelLast - Returns true if peeling the last iteration from
-  /// this regular or SameSD loop level will break this dependence.
-  virtual bool isPeelLast(unsigned Level, bool SameSD = false) const {
-    return false;
-  }
-
-  /// inSameSDLoops - Returns true if this level is an SameSD level, i.e.,
-  /// performed across two separate loop nests that have the Same Iteration and
-  /// Depth.
-  virtual bool inSameSDLoops(unsigned Level) const { return false; }
-
-  /// isScalar - Returns true if a particular regular or SameSD level is
-  /// scalar; that is, if no subscript in the source or destination mention
-  /// the induction variable associated with the loop at this level.
-  virtual bool isScalar(unsigned Level, bool SameSD = false) const;
 
   /// getNextPredecessor - Returns the value of the NextPredecessor field.
   const Dependence *getNextPredecessor() const { return NextPredecessor; }
@@ -291,46 +300,31 @@ public:
 protected:
   Instruction *Src, *Dst;
 
-private:
+public:
   SCEVUnionPredicate Assumptions;
   const Dependence *NextPredecessor = nullptr, *NextSuccessor = nullptr;
   friend class DependenceInfo;
-};
-
-/// FullDependence - This class represents a dependence between two memory
-/// references in a function. It contains detailed information about the
-/// dependence (direction vectors, etc.) and is used when the compiler is
-/// able to accurately analyze the interaction of the references; that is,
-/// it is not a confused dependence (see Dependence). In most cases
-/// (for output, flow, and anti dependences), the dependence implies an
-/// ordering, where the source must precede the destination; in contrast,
-/// input dependences are unordered.
-class LLVM_ABI FullDependence final : public Dependence {
-public:
-  FullDependence(Instruction *Source, Instruction *Destination,
-                 const SCEVUnionPredicate &Assumes,
-                 bool PossiblyLoopIndependent, unsigned Levels);
 
   /// isLoopIndependent - Returns true if this is a loop-independent
   /// dependence.
-  bool isLoopIndependent() const override { return LoopIndependent; }
+  bool isLoopIndependent() const { return LoopIndependent; }
 
   /// isConfused - Returns true if this dependence is confused
   /// (the compiler understands nothing and makes worst-case
   /// assumptions).
-  bool isConfused() const override { return false; }
+  bool isConfused() const { return false; }
 
   /// isConsistent - Returns true if this dependence is consistent
   /// (occurs every time the source and destination are executed).
-  bool isConsistent() const override { return Consistent; }
+  bool isConsistent() const { return Consistent; }
 
   /// getLevels - Returns the number of common loops surrounding the
   /// source and destination of the dependence.
-  unsigned getLevels() const override { return Levels; }
+  unsigned getLevels() const { return Levels; }
 
   /// getSameSDLevels - Returns the number of separate SameSD loops surrounding
   /// the source and destination of the dependence.
-  unsigned getSameSDLevels() const override { return SameSDLevels; }
+  unsigned getSameSDLevels() const { return SameSDLevels; }
 
   /// getDVEntry - Returns the DV entry associated with a regular or a
   /// SameSD level.
@@ -348,39 +342,39 @@ public:
 
   /// getDirection - Returns the direction associated with a particular
   /// common or SameSD level.
-  DVEntryAux getDirection(unsigned Level, bool SameSD = false) const override;
+  unsigned getDirection(unsigned Level, bool SameSD = false) const;
 
   /// getDistance - Returns the distance (or NULL) associated with a
   /// particular common or SameSD level.
-  const SCEV *getDistance(unsigned Level, bool SameSD = false) const override;
+  const SCEV *getDistance(unsigned Level, bool SameSD = false) const;
 
   /// Check if the direction vector is negative. A negative direction
   /// vector means Src and Dst are reversed in the actual program.
-  bool isDirectionNegative() const override;
+  bool isDirectionNegative() const;
 
   /// If the direction vector is negative, normalize the direction
   /// vector to make it non-negative. Normalization is done by reversing
   /// Src and Dst, plus reversing the dependence directions and distances
   /// in the vector.
-  bool normalize(ScalarEvolution *SE) override;
+  bool normalize(ScalarEvolution *SE);
 
   /// isPeelFirst - Returns true if peeling the first iteration from
   /// this regular or SameSD loop level will break this dependence.
-  bool isPeelFirst(unsigned Level, bool SameSD = false) const override;
+  bool isPeelFirst(unsigned Level, bool SameSD = false) const;
 
   /// isPeelLast - Returns true if peeling the last iteration from
   /// this regular or SameSD loop level will break this dependence.
-  bool isPeelLast(unsigned Level, bool SameSD = false) const override;
+  bool isPeelLast(unsigned Level, bool SameSD = false) const;
 
   /// inSameSDLoops - Returns true if this level is an SameSD level, i.e.,
   /// performed across two separate loop nests that have the Same Iteration and
   /// Depth.
-  bool inSameSDLoops(unsigned Level) const override;
+  bool inSameSDLoops(unsigned Level) const;
 
   /// isScalar - Returns true if a particular regular or SameSD level is
   /// scalar; that is, if no subscript in the source or destination mention
   /// the induction variable associated with the loop at this level.
-  bool isScalar(unsigned Level, bool SameSD = false) const override;
+  bool isScalar(unsigned Level, bool SameSD = false) const;
 
 private:
   unsigned short Levels;
@@ -444,8 +438,8 @@ private:
     const SCEV *Iterations;
     const SCEV *Upper[8];
     const SCEV *Lower[8];
-    DVEntryAux Direction;
-    DVEntryAux DirSet;
+    unsigned char Direction;
+    unsigned char DirSet;
   };
 
   /// Returns true if two loops have the Same iteration Space and Depth. To be
@@ -583,7 +577,7 @@ private:
   /// If there might be a dependence, returns false.
   /// If the dependence isn't proven to exist,
   /// marks the Result as inconsistent.
-  bool testZIV(const SCEV *Src, const SCEV *Dst, FullDependence &Result) const;
+  bool testZIV(const SCEV *Src, const SCEV *Dst, Dependence &Result) const;
 
   /// testSIV - Tests the SIV subscript pair (Src and Dst) for dependence.
   /// Things of the form [c1 + a1*i] and [c2 + a2*j], where
@@ -596,7 +590,7 @@ private:
   /// If the dependence isn't proven to exist,
   /// marks the Result as inconsistent.
   bool testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
-               FullDependence &Result, bool UnderRuntimeAssumptions);
+               Dependence &Result, bool UnderRuntimeAssumptions);
 
   /// testRDIV - Tests the RDIV subscript pair (Src and Dst) for dependence.
   /// Things of the form [c1 + a1*i] and [c2 + a2*j]
@@ -607,13 +601,13 @@ private:
   /// Returns true if any possible dependence is disproved.
   /// If there might be a dependence, returns false.
   /// Marks the Result as inconsistent.
-  bool testRDIV(const SCEV *Src, const SCEV *Dst, FullDependence &Result) const;
+  bool testRDIV(const SCEV *Src, const SCEV *Dst, Dependence &Result) const;
 
   /// testMIV - Tests the MIV subscript pair (Src and Dst) for dependence.
   /// Returns true if dependence disproved.
   /// Can sometimes refine direction vectors.
   bool testMIV(const SCEV *Src, const SCEV *Dst, const SmallBitVector &Loops,
-               FullDependence &Result) const;
+               Dependence &Result) const;
 
   /// strongSIVtest - Tests the strong SIV subscript pair (Src and Dst)
   /// for dependence.
@@ -626,7 +620,7 @@ private:
   bool strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
                      const SCEV *DstConst, const Loop *CurrentSrcLoop,
                      const Loop *CurrentDstLoop, unsigned Level,
-                     FullDependence &Result, bool UnderRuntimeAssumptions);
+                     Dependence &Result, bool UnderRuntimeAssumptions);
 
   /// weakCrossingSIVtest - Tests the weak-crossing SIV subscript pair
   /// (Src and Dst) for dependence.
@@ -640,7 +634,7 @@ private:
   bool weakCrossingSIVtest(const SCEV *SrcCoeff, const SCEV *SrcConst,
                            const SCEV *DstConst, const Loop *CurrentSrcLoop,
                            const Loop *CurrentDstLoop, unsigned Level,
-                           FullDependence &Result) const;
+                           Dependence &Result) const;
 
   /// ExactSIVtest - Tests the SIV subscript pair
   /// (Src and Dst) for dependence.
@@ -654,7 +648,7 @@ private:
   bool exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
                     const SCEV *SrcConst, const SCEV *DstConst,
                     const Loop *CurrentSrcLoop, const Loop *CurrentDstLoop,
-                    unsigned Level, FullDependence &Result) const;
+                    unsigned Level, Dependence &Result) const;
 
   /// weakZeroSrcSIVtest - Tests the weak-zero SIV subscript pair
   /// (Src and Dst) for dependence.
@@ -669,7 +663,7 @@ private:
   bool weakZeroSrcSIVtest(const SCEV *DstCoeff, const SCEV *SrcConst,
                           const SCEV *DstConst, const Loop *CurrentSrcLoop,
                           const Loop *CurrentDstLoop, unsigned Level,
-                          FullDependence &Result) const;
+                          Dependence &Result) const;
 
   /// weakZeroDstSIVtest - Tests the weak-zero SIV subscript pair
   /// (Src and Dst) for dependence.
@@ -684,7 +678,7 @@ private:
   bool weakZeroDstSIVtest(const SCEV *SrcCoeff, const SCEV *SrcConst,
                           const SCEV *DstConst, const Loop *CurrentSrcLoop,
                           const Loop *CurrentDstLoop, unsigned Level,
-                          FullDependence &Result) const;
+                          Dependence &Result) const;
 
   /// exactRDIVtest - Tests the RDIV subscript pair for dependence.
   /// Things of the form [c1 + a*i] and [c2 + b*j],
@@ -697,7 +691,7 @@ private:
   bool exactRDIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
                      const SCEV *SrcConst, const SCEV *DstConst,
                      const Loop *SrcLoop, const Loop *DstLoop,
-                     FullDependence &Result) const;
+                     Dependence &Result) const;
 
   /// symbolicRDIVtest - Tests the RDIV subscript pair for dependence.
   /// Things of the form [c1 + a*i] and [c2 + b*j],
@@ -719,7 +713,7 @@ private:
   //  Can handle some symbolics that even the SIV tests don't get,
   /// so we use it as a backup for everything.
   bool gcdMIVtest(const SCEV *Src, const SCEV *Dst,
-                  FullDependence &Result) const;
+                  Dependence &Result) const;
 
   /// banerjeeMIVtest - Tests an MIV subscript pair for dependence.
   /// Returns true if any possible dependence is disproved.
@@ -727,7 +721,7 @@ private:
   /// Computes directions.
   bool banerjeeMIVtest(const SCEV *Src, const SCEV *Dst,
                        const SmallBitVector &Loops,
-                       FullDependence &Result) const;
+                       Dependence &Result) const;
 
   /// collectCoeffInfo - Walks through the subscript, collecting each
   /// coefficient, the associated loop bounds, and recording its positive and
@@ -781,7 +775,7 @@ private:
                              unsigned &DepthExpanded, const SCEV *Delta) const;
 
   /// testBounds - Returns true iff the current bounds are plausible.
-  bool testBounds(DVEntryAux DirKind, unsigned Level, BoundInfo *Bound,
+  bool testBounds(unsigned char DirKind, unsigned Level, BoundInfo *Bound,
                   const SCEV *Delta) const;
 
   /// findBoundsALL - Computes the upper and lower bounds for level K

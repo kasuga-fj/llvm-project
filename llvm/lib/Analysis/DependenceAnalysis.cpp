@@ -575,20 +575,14 @@ bool Dependence::isAnti() const {
   return Src->mayReadFromMemory() && Dst->mayWriteToMemory();
 }
 
-// Returns true if a particular level is scalar; that is,
-// if no subscript in the source or destination mention the induction
-// variable associated with the loop at this level.
-// Leave this out of line, so it will serve as a virtual method anchor
-bool Dependence::isScalar(unsigned level, bool IsSameSD) const { return false; }
-
 //===----------------------------------------------------------------------===//
-// FullDependence methods
+// Dependence methods
 
-FullDependence::FullDependence(Instruction *Source, Instruction *Destination,
+Dependence::Dependence(Instruction *Source, Instruction *Destination,
                                const SCEVUnionPredicate &Assumes,
                                bool PossiblyLoopIndependent,
                                unsigned CommonLevels)
-    : Dependence(Source, Destination, Assumes), Levels(CommonLevels),
+    : Src(Source), Dst(Destination), Assumptions(Assumes), Levels(CommonLevels),
       LoopIndependent(PossiblyLoopIndependent) {
   Consistent = true;
   SameSDLevels = 0;
@@ -611,9 +605,9 @@ FullDependence::FullDependence(Instruction *Source, Instruction *Destination,
 // as well. Nevertheless, current isDirectionNegative() only returns
 // true with a '>' or '>=' dependency for ease of canonicalizing the
 // dependency vector, since the reverse of '<>', '<=>' and "*" is itself.
-bool FullDependence::isDirectionNegative() const {
+bool Dependence::isDirectionNegative() const {
   for (unsigned Level = 1; Level <= Levels; ++Level) {
-    auto Direction = DV[Level - 1].Direction;
+    unsigned char Direction = DV[Level - 1].Direction;
     if (Direction == Dependence::DVEntry::EQ)
       continue;
     if (Direction == Dependence::DVEntry::GT ||
@@ -624,7 +618,7 @@ bool FullDependence::isDirectionNegative() const {
   return false;
 }
 
-bool FullDependence::normalize(ScalarEvolution *SE) {
+bool Dependence::normalize(ScalarEvolution *SE) {
   if (!isDirectionNegative())
     return false;
 
@@ -632,10 +626,10 @@ bool FullDependence::normalize(ScalarEvolution *SE) {
              dump(dbgs()););
   std::swap(Src, Dst);
   for (unsigned Level = 1; Level <= Levels; ++Level) {
-    auto Direction = DV[Level - 1].Direction;
+    unsigned char Direction = DV[Level - 1].Direction;
     // Reverse the direction vector, this means LT becomes GT
     // and GT becomes LT.
-    auto RevDirection = Direction & Dependence::DVEntry::EQ;
+    unsigned char RevDirection = Direction & Dependence::DVEntry::EQ;
     if (Direction & Dependence::DVEntry::LT)
       RevDirection |= Dependence::DVEntry::GT;
     if (Direction & Dependence::DVEntry::GT)
@@ -655,39 +649,39 @@ bool FullDependence::normalize(ScalarEvolution *SE) {
 
 // getDirection - Returns the direction associated with a particular common or
 // SameSD level.
-DVEntryAux FullDependence::getDirection(unsigned Level, bool IsSameSD) const {
+unsigned Dependence::getDirection(unsigned Level, bool IsSameSD) const {
   return getDVEntry(Level, IsSameSD).Direction;
 }
 
 // Returns the distance (or NULL) associated with a particular common or
 // SameSD level.
-const SCEV *FullDependence::getDistance(unsigned Level, bool IsSameSD) const {
+const SCEV *Dependence::getDistance(unsigned Level, bool IsSameSD) const {
   return getDVEntry(Level, IsSameSD).Distance;
 }
 
 // Returns true if a particular regular or SameSD level is scalar; that is,
 // if no subscript in the source or destination mention the induction variable
 // associated with the loop at this level.
-bool FullDependence::isScalar(unsigned Level, bool IsSameSD) const {
+bool Dependence::isScalar(unsigned Level, bool IsSameSD) const {
   return getDVEntry(Level, IsSameSD).Scalar;
 }
 
 // Returns true if peeling the first iteration from this regular or SameSD
 // loop level will break this dependence.
-bool FullDependence::isPeelFirst(unsigned Level, bool IsSameSD) const {
+bool Dependence::isPeelFirst(unsigned Level, bool IsSameSD) const {
   return getDVEntry(Level, IsSameSD).PeelFirst;
 }
 
 // Returns true if peeling the last iteration from this regular or SameSD
 // loop level will break this dependence.
-bool FullDependence::isPeelLast(unsigned Level, bool IsSameSD) const {
+bool Dependence::isPeelLast(unsigned Level, bool IsSameSD) const {
   return getDVEntry(Level, IsSameSD).PeelLast;
 }
 
 // inSameSDLoops - Returns true if this level is an SameSD level, i.e.,
 // performed across two separate loop nests that have the Same iteration space
 // and Depth.
-bool FullDependence::inSameSDLoops(unsigned Level) const {
+bool Dependence::inSameSDLoops(unsigned Level) const {
   assert(0 < Level && Level <= static_cast<unsigned>(Levels) + SameSDLevels &&
          "Level out of range");
   return Level > Levels;
@@ -825,7 +819,7 @@ void Dependence::dumpImp(raw_ostream &OS, bool IsSameSD) const {
     else if (isScalar(II, OnSameSD))
       OS << "S";
     else {
-      auto Direction = getDirection(II, OnSameSD);
+      unsigned Direction = getDirection(II, OnSameSD);
       if (Direction == DVEntry::ALL)
         OS << "*";
       else {
@@ -1289,7 +1283,7 @@ static bool isDependenceTestEnabled(DependenceTestType Test) {
 //
 // Return true if dependence disproved.
 bool DependenceInfo::testZIV(const SCEV *Src, const SCEV *Dst,
-                             FullDependence &Result) const {
+                             Dependence &Result) const {
   LLVM_DEBUG(dbgs() << "    src = " << *Src << "\n");
   LLVM_DEBUG(dbgs() << "    dst = " << *Dst << "\n");
   ++ZIVapplications;
@@ -1337,7 +1331,7 @@ bool DependenceInfo::testZIV(const SCEV *Src, const SCEV *Dst,
 bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
                                    const SCEV *DstConst, const Loop *CurSrcLoop,
                                    const Loop *CurDstLoop, unsigned Level,
-                                   FullDependence &Result,
+                                   Dependence &Result,
                                    bool UnderRuntimeAssumptions) {
   if (!isDependenceTestEnabled(DependenceTestType::StrongSIV))
     return false;
@@ -1453,7 +1447,7 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
     // The double negatives above are confusing.
     // It helps to read !SE->isKnownNonZero(Delta)
     // as "Delta might be Zero"
-    auto NewDirection = Dependence::DVEntry::NONE;
+    unsigned NewDirection = Dependence::DVEntry::NONE;
     if ((DeltaMaybePositive && CoeffMaybePositive) ||
         (DeltaMaybeNegative && CoeffMaybeNegative))
       NewDirection = Dependence::DVEntry::LT;
@@ -1462,8 +1456,8 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
     if ((DeltaMaybeNegative && CoeffMaybePositive) ||
         (DeltaMaybePositive && CoeffMaybeNegative))
       NewDirection |= Dependence::DVEntry::GT;
-    //if (NewDirection < Result.DV[Level].Direction)
-    //  ++StrongSIVsuccesses;
+    if (NewDirection < Result.DV[Level].Direction)
+      ++StrongSIVsuccesses;
     Result.DV[Level].Direction &= NewDirection;
   }
   return false;
@@ -1502,7 +1496,7 @@ bool DependenceInfo::weakCrossingSIVtest(const SCEV *Coeff,
                                          const SCEV *DstConst,
                                          const Loop *CurSrcLoop,
                                          const Loop *CurDstLoop, unsigned Level,
-                                         FullDependence &Result) const {
+                                         Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::WeakCrossingSIV))
     return false;
 
@@ -1765,7 +1759,7 @@ bool DependenceInfo::exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
                                   const SCEV *SrcConst, const SCEV *DstConst,
                                   const Loop *CurSrcLoop,
                                   const Loop *CurDstLoop, unsigned Level,
-                                  FullDependence &Result) const {
+                                  Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::ExactSIV))
     return false;
 
@@ -1866,7 +1860,7 @@ bool DependenceInfo::exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
   }
 
   // explore directions
-  auto NewDirection = Dependence::DVEntry::NONE;
+  unsigned NewDirection = Dependence::DVEntry::NONE;
   OverflowSafeSignedAPInt LowerDistance, UpperDistance;
   OverflowSafeSignedAPInt OTY(TY), OTX(TX), OTA(TA), OTB(TB), OTL(TL), OTU(TU);
   // NOTE: It's unclear whether these calculations can overflow. At the moment,
@@ -1951,7 +1945,7 @@ bool DependenceInfo::weakZeroSrcSIVtest(const SCEV *DstCoeff,
                                         const SCEV *DstConst,
                                         const Loop *CurSrcLoop,
                                         const Loop *CurDstLoop, unsigned Level,
-                                        FullDependence &Result) const {
+                                        Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::WeakZeroSIV))
     return false;
 
@@ -2065,7 +2059,7 @@ bool DependenceInfo::weakZeroDstSIVtest(const SCEV *SrcCoeff,
                                         const SCEV *DstConst,
                                         const Loop *CurSrcLoop,
                                         const Loop *CurDstLoop, unsigned Level,
-                                        FullDependence &Result) const {
+                                        Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::WeakZeroSIV))
     return false;
 
@@ -2152,7 +2146,7 @@ bool DependenceInfo::weakZeroDstSIVtest(const SCEV *SrcCoeff,
 bool DependenceInfo::exactRDIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
                                    const SCEV *SrcConst, const SCEV *DstConst,
                                    const Loop *SrcLoop, const Loop *DstLoop,
-                                   FullDependence &Result) const {
+                                   Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::ExactRDIV))
     return false;
 
@@ -2411,7 +2405,7 @@ bool DependenceInfo::symbolicRDIVtest(const SCEV *A1, const SCEV *A2,
 //
 // Return true if dependence disproved.
 bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
-                             FullDependence &Result,
+                             Dependence &Result,
                              bool UnderRuntimeAssumptions) {
   LLVM_DEBUG(dbgs() << "    src = " << *Src << "\n");
   LLVM_DEBUG(dbgs() << "    dst = " << *Dst << "\n");
@@ -2481,7 +2475,7 @@ bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
 //
 // Return true if dependence disproved.
 bool DependenceInfo::testRDIV(const SCEV *Src, const SCEV *Dst,
-                              FullDependence &Result) const {
+                              Dependence &Result) const {
   // we have 3 possible situations here:
   //   1) [a*i + b] and [c*j + d]
   //   2) [a*i + c*j + b] and [d]
@@ -2539,7 +2533,7 @@ bool DependenceInfo::testRDIV(const SCEV *Src, const SCEV *Dst,
 // Can sometimes refine direction vectors.
 bool DependenceInfo::testMIV(const SCEV *Src, const SCEV *Dst,
                              const SmallBitVector &Loops,
-                             FullDependence &Result) const {
+                             Dependence &Result) const {
   LLVM_DEBUG(dbgs() << "    src = " << *Src << "\n");
   LLVM_DEBUG(dbgs() << "    dst = " << *Dst << "\n");
   Result.Consistent = false;
@@ -2618,7 +2612,7 @@ bool DependenceInfo::accumulateCoefficientsGCD(const SCEV *Expr,
 // changes the nature of the test from "greatest common divisor"
 // to "a common divisor".
 bool DependenceInfo::gcdMIVtest(const SCEV *Src, const SCEV *Dst,
-                                FullDependence &Result) const {
+                                Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::GCDMIV))
     return false;
 
@@ -2771,7 +2765,7 @@ bool DependenceInfo::gcdMIVtest(const SCEV *Src, const SCEV *Dst,
 // Return true if dependence disproved.
 bool DependenceInfo::banerjeeMIVtest(const SCEV *Src, const SCEV *Dst,
                                      const SmallBitVector &Loops,
-                                     FullDependence &Result) const {
+                                     Dependence &Result) const {
   if (!isDependenceTestEnabled(DependenceTestType::BanerjeeMIV))
     return false;
 
@@ -2818,7 +2812,7 @@ bool DependenceInfo::banerjeeMIVtest(const SCEV *Src, const SCEV *Dst,
       bool Improved = false;
       for (unsigned K = 1; K <= CommonLevels; ++K) {
         if (Loops[K]) {
-          auto Old = Result.DV[K - 1].Direction;
+          unsigned Old = Result.DV[K - 1].Direction;
           Result.DV[K - 1].Direction = Old & Bound[K].DirSet;
           Improved |= Old != Result.DV[K - 1].Direction;
           if (!Result.DV[K - 1].Direction) {
@@ -2874,7 +2868,7 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
       if (Loops[K]) {
         Bound[K].DirSet |= Bound[K].Direction;
 #ifndef NDEBUG
-        switch (long(Bound[K].Direction)) {
+        switch (Bound[K].Direction) {
         case Dependence::DVEntry::LT:
           LLVM_DEBUG(dbgs() << " <");
           break;
@@ -2966,7 +2960,7 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
 }
 
 // Returns true iff the current bounds are plausible.
-bool DependenceInfo::testBounds(DVEntryAux DirKind, unsigned Level,
+bool DependenceInfo::testBounds(unsigned char DirKind, unsigned Level,
                                 BoundInfo *Bound, const SCEV *Delta) const {
   Bound[Level].Direction = DirKind;
   if (const SCEV *LowerBound = getLowerBound(Bound))
@@ -3598,7 +3592,7 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   if (SameSDLevels > 0)
     SameSDLoopsCount++;
 
-  FullDependence Result(Src, Dst, SCEVUnionPredicate(Assume, *SE),
+  Dependence Result(Src, Dst, SCEVUnionPredicate(Assume, *SE),
                         PossiblyLoopIndependent, CommonLevels);
   ++TotalArrayPairs;
 
@@ -3697,9 +3691,9 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     assert(CommonLevels >= SameSDLevels);
     CommonLevels -= SameSDLevels;
     MaxLevels += SameSDLevels;
-    std::unique_ptr<FullDependence::DVEntry[]> DV, DVSameSD;
-    DV = std::make_unique<FullDependence::DVEntry[]>(CommonLevels);
-    DVSameSD = std::make_unique<FullDependence::DVEntry[]>(SameSDLevels);
+    std::unique_ptr<Dependence::DVEntry[]> DV, DVSameSD;
+    DV = std::make_unique<Dependence::DVEntry[]>(CommonLevels);
+    DVSameSD = std::make_unique<Dependence::DVEntry[]>(SameSDLevels);
     for (unsigned Level = 0; Level < CommonLevels; ++Level)
       DV[Level] = Result.DV[Level];
     for (unsigned Level = 0; Level < SameSDLevels; ++Level)
@@ -3737,5 +3731,5 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
       return nullptr;
   }
 
-  return std::make_unique<FullDependence>(std::move(Result));
+  return std::make_unique<Dependence>(std::move(Result));
 }
