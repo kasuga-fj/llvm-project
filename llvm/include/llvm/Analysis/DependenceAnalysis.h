@@ -54,6 +54,61 @@ class LoopInfo;
 class SCEVConstant;
 class raw_ostream;
 
+struct DVEntryAux : public std::tuple<bool, bool, bool> {
+  using std::tuple<bool, bool, bool>::tuple;
+
+  constexpr DVEntryAux &operator&=(const DVEntryAux &RHS) {
+    std::get<0>(*this) &= std::get<0>(RHS);
+    std::get<1>(*this) &= std::get<1>(RHS);
+    std::get<2>(*this) &= std::get<2>(RHS);
+    return *this;
+  }
+
+  constexpr DVEntryAux operator&(const DVEntryAux &RHS) const {
+    DVEntryAux Result = *this;
+    Result &= RHS;
+    return Result;
+  }
+
+  constexpr DVEntryAux &operator|=(const DVEntryAux &RHS) {
+    std::get<0>(*this) |= std::get<0>(RHS);
+    std::get<1>(*this) |= std::get<1>(RHS);
+    std::get<2>(*this) |= std::get<2>(RHS);
+    return *this;
+  }
+
+  constexpr DVEntryAux operator|(const DVEntryAux &RHS) const {
+    DVEntryAux Result = *this;
+    Result |= RHS;
+    return Result;
+  }
+
+  constexpr DVEntryAux operator~() const {
+    return DVEntryAux(!std::get<0>(*this), !std::get<1>(*this), !std::get<2>(*this));
+  }
+
+  constexpr bool operator==(const DVEntryAux &RHS) const {
+    return std::get<0>(*this) == std::get<0>(RHS) && 
+           std::get<1>(*this) == std::get<1>(RHS) &&
+           std::get<2>(*this) == std::get<2>(RHS);
+  }
+
+  constexpr bool operator!=(const DVEntryAux &RHS) const { return !(*this == RHS); }
+
+  constexpr operator bool() const { return std::get<0>(*this) || std::get<1>(*this) || std::get<2>(*this); }
+
+  constexpr operator long() const {
+    int Result = 0;
+    if (std::get<0>(*this))
+      Result |= 1;
+    if (std::get<1>(*this))
+      Result |= 2;
+    if (std::get<2>(*this))
+      Result |= 4;
+    return Result;
+  }
+};
+
 /// Dependence - This class represents a dependence between two memory
 /// memory references in a function. It contains minimal information and
 /// is used in the very common situation where the compiler is unable to
@@ -79,64 +134,6 @@ public:
       : Src(Source), Dst(Destination), Assumptions(A) {}
   virtual ~Dependence() = default;
 
-  struct DVEntryAux {
-    bool Lt;
-    bool Eq;
-    bool Gt;
-
-    constexpr DVEntryAux(bool Lt = true, bool Eq = true, bool Gt = true)
-        : Lt(Lt), Eq(Eq), Gt(Gt) {}
-
-    constexpr DVEntryAux &operator&=(const DVEntryAux &Other) {
-      Lt &= Other.Lt;
-      Eq &= Other.Eq;
-      Gt &= Other.Gt;
-      return *this;
-    }
-
-    constexpr DVEntryAux operator&(const DVEntryAux &Other) const {
-      DVEntryAux Result = *this;
-      Result &= Other;
-      return Result;
-    }
-
-    constexpr DVEntryAux &operator|=(const DVEntryAux &Other) {
-      Lt |= Other.Lt;
-      Eq |= Other.Eq;
-      Gt |= Other.Gt;
-      return *this;
-    }
-
-    constexpr DVEntryAux operator|(const DVEntryAux &Other) const {
-      DVEntryAux Result = *this;
-      Result |= Other;
-      return Result;
-    }
-
-    constexpr DVEntryAux operator~() const {
-      return DVEntryAux(!Lt, !Eq, !Gt);
-    }
-
-    constexpr bool operator==(const DVEntryAux &Other) const {
-      return Lt == Other.Lt && Eq == Other.Eq && Gt == Other.Gt;
-    }
-
-    constexpr bool operator!=(const DVEntryAux &Other) const { return !(*this == Other); }
-
-    constexpr operator bool() const { return Lt || Eq || Gt; }
-
-    constexpr operator long() const {
-      int Result = 0;
-      if (Lt)
-        Result |= 1;
-      if (Eq)
-        Result |= 2;
-      if (Gt)
-        Result |= 4;
-      return Result;
-    }
-  };
-
   /// Dependence::DVEntry - Each level in the distance/direction vector
   /// has a direction (or perhaps a union of several directions), and
   /// perhaps a distance.
@@ -151,22 +148,25 @@ public:
   ///      }
   ///    }
   struct DVEntry {
-    DVEntryAux Direction; // Init to ALL, then refine.
     bool Scalar;             // Init to true.
     bool PeelFirst; // Peeling the first iteration will break dependence.
     bool PeelLast;  // Peeling the last iteration will break the dependence.
     const SCEV *Distance = nullptr; // NULL implies no distance available.
     DVEntry()
-        : Direction(), Scalar(true), PeelFirst(false), PeelLast(false) {}
+        : Scalar(true), PeelFirst(false), PeelLast(false), Direction(true, true, true) {}
 
-    constexpr static DVEntryAux NONE() { return DVEntryAux(false, false, false); }
-    constexpr static DVEntryAux LT() { return DVEntryAux(true, false, false); }
-    constexpr static DVEntryAux EQ() { return DVEntryAux(false, true, false); }
-    constexpr static DVEntryAux LE() { return DVEntryAux(true, true, false); }
-    constexpr static DVEntryAux GT() { return DVEntryAux(false, false, true); }
-    constexpr static DVEntryAux NE() { return DVEntryAux(true, false, true); }
-    constexpr static DVEntryAux GE() { return DVEntryAux(false, true, true); }
-    constexpr static DVEntryAux ALL() { return DVEntryAux(true, true, true); }
+    DVEntryAux Direction; // Init to ALL, then refine.
+    bool Lt = true;
+    bool Eq = true;
+    bool Gt = true;
+    static constexpr DVEntryAux NONE{false, false, false};
+    static constexpr DVEntryAux LT{true, false, false};
+    static constexpr DVEntryAux EQ{false, true, false};
+    static constexpr DVEntryAux LE{true, true, false};
+    static constexpr DVEntryAux GT{false, false, true};
+    static constexpr DVEntryAux NE{true, false, true};
+    static constexpr DVEntryAux GE{false, true, true};
+    static constexpr DVEntryAux ALL{true, true, true};
   };
 
   /// getSrc - Returns the source instruction for this dependence.
@@ -220,7 +220,7 @@ public:
   /// getDirection - Returns the direction associated with a particular
   /// common or SameSD level.
   virtual DVEntryAux getDirection(unsigned Level, bool SameSD = false) const {
-    return DVEntry::ALL();
+    return DVEntry::ALL;
   }
 
   /// getDistance - Returns the distance (or NULL) associated with a
@@ -441,8 +441,8 @@ private:
     const SCEV *Iterations;
     const SCEV *Upper[8];
     const SCEV *Lower[8];
-    Dependence::DVEntryAux Direction;
-    Dependence::DVEntryAux DirSet;
+    DVEntryAux Direction;
+    DVEntryAux DirSet;
   };
 
   /// Returns true if two loops have the Same iteration Space and Depth. To be
@@ -778,7 +778,7 @@ private:
                              unsigned &DepthExpanded, const SCEV *Delta) const;
 
   /// testBounds - Returns true iff the current bounds are plausible.
-  bool testBounds(Dependence::DVEntryAux DirKind, unsigned Level, BoundInfo *Bound,
+  bool testBounds(DVEntryAux DirKind, unsigned Level, BoundInfo *Bound,
                   const SCEV *Delta) const;
 
   /// findBoundsALL - Computes the upper and lower bounds for level K

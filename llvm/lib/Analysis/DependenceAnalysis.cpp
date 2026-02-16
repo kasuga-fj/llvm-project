@@ -517,7 +517,7 @@ static void dumpExampleDependence(raw_ostream &OS, DependenceInfo *DA,
               const SCEV *Distance = D->getDistance(Level);
               bool IsDistanceZero = Distance && Distance->isZero();
               bool IsDirectionEQ =
-                  D->getDirection(Level) == Dependence::DVEntry::EQ();
+                  D->getDirection(Level) == Dependence::DVEntry::EQ;
               assert(IsDistanceZero == IsDirectionEQ &&
                      "Inconsistent distance and direction.");
             }
@@ -614,10 +614,10 @@ FullDependence::FullDependence(Instruction *Source, Instruction *Destination,
 bool FullDependence::isDirectionNegative() const {
   for (unsigned Level = 1; Level <= Levels; ++Level) {
     auto Direction = DV[Level - 1].Direction;
-    if (Direction == Dependence::DVEntry::EQ())
+    if (Direction == Dependence::DVEntry::EQ)
       continue;
-    if (Direction == Dependence::DVEntry::GT() ||
-        Direction == Dependence::DVEntry::GE())
+    if (Direction == Dependence::DVEntry::GT ||
+        Direction == Dependence::DVEntry::GE)
       return true;
     return false;
   }
@@ -635,11 +635,11 @@ bool FullDependence::normalize(ScalarEvolution *SE) {
     auto Direction = DV[Level - 1].Direction;
     // Reverse the direction vector, this means LT becomes GT
     // and GT becomes LT.
-    auto RevDirection = Direction & Dependence::DVEntry::EQ();
-    if (Direction & Dependence::DVEntry::LT())
-      RevDirection |= Dependence::DVEntry::GT();
-    if (Direction & Dependence::DVEntry::GT())
-      RevDirection |= Dependence::DVEntry::LT();
+    auto RevDirection = Direction & Dependence::DVEntry::EQ;
+    if (Direction & Dependence::DVEntry::LT)
+      RevDirection |= Dependence::DVEntry::GT;
+    if (Direction & Dependence::DVEntry::GT)
+      RevDirection |= Dependence::DVEntry::LT;
     DV[Level - 1].Direction = RevDirection;
     // Reverse the dependence distance as well.
     if (DV[Level - 1].Distance != nullptr)
@@ -655,7 +655,7 @@ bool FullDependence::normalize(ScalarEvolution *SE) {
 
 // getDirection - Returns the direction associated with a particular common or
 // SameSD level.
-Dependence::DVEntryAux FullDependence::getDirection(unsigned Level, bool IsSameSD) const {
+DVEntryAux FullDependence::getDirection(unsigned Level, bool IsSameSD) const {
   return getDVEntry(Level, IsSameSD).Direction;
 }
 
@@ -826,14 +826,14 @@ void Dependence::dumpImp(raw_ostream &OS, bool IsSameSD) const {
       OS << "S";
     else {
       auto Direction = getDirection(II, OnSameSD);
-      if (Direction == DVEntry::ALL())
+      if (Direction == DVEntry::ALL)
         OS << "*";
       else {
-        if (Direction & DVEntry::LT())
+        if (Direction & DVEntry::LT)
           OS << "<";
-        if (Direction & DVEntry::EQ())
+        if (Direction & DVEntry::EQ)
           OS << "=";
-        if (Direction & DVEntry::GT())
+        if (Direction & DVEntry::GT)
           OS << ">";
       }
     }
@@ -1401,13 +1401,26 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
       ++StrongSIVsuccesses;
       return true;
     }
+#if 0
     Result.DV[Level].Distance = SE->getConstant(Distance);
     if (Distance.sgt(0))
-      Result.DV[Level].Direction &= Dependence::DVEntry::LT();
+      Result.DV[Level].Direction &= Dependence::DVEntry::LT;
     else if (Distance.slt(0))
-      Result.DV[Level].Direction &= Dependence::DVEntry::GT();
+      Result.DV[Level].Direction &= Dependence::DVEntry::GT;
     else
-      Result.DV[Level].Direction &= Dependence::DVEntry::EQ();
+      Result.DV[Level].Direction &= Dependence::DVEntry::EQ;
+#else
+    if (Distance.sgt(0)) {
+      Result.DV[Level].Eq = false;
+      Result.DV[Level].Gt = false;
+    } else if (Distance.slt(0)) {
+      Result.DV[Level].Lt = false;
+      Result.DV[Level].Eq = false;
+    } else {
+      Result.DV[Level].Lt = false;
+      Result.DV[Level].Gt = false;
+    }
+#endif
     ++StrongSIVsuccesses;
   } else if (Delta->isZero()) {
     // Check if coefficient could be zero. If so, 0/0 is undefined and we
@@ -1434,7 +1447,7 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
     }
     // Since 0/X == 0 (where X is known non-zero or assumed non-zero).
     Result.DV[Level].Distance = Delta;
-    Result.DV[Level].Direction &= Dependence::DVEntry::EQ();
+    Result.DV[Level].Direction &= Dependence::DVEntry::EQ;
     ++StrongSIVsuccesses;
   } else {
     if (Coeff->isOne()) {
@@ -1453,15 +1466,15 @@ bool DependenceInfo::strongSIVtest(const SCEV *Coeff, const SCEV *SrcConst,
     // The double negatives above are confusing.
     // It helps to read !SE->isKnownNonZero(Delta)
     // as "Delta might be Zero"
-    auto NewDirection = Dependence::DVEntry::NONE();
+    auto NewDirection = Dependence::DVEntry::NONE;
     if ((DeltaMaybePositive && CoeffMaybePositive) ||
         (DeltaMaybeNegative && CoeffMaybeNegative))
-      NewDirection = Dependence::DVEntry::LT();
+      NewDirection = Dependence::DVEntry::LT;
     if (DeltaMaybeZero)
-      NewDirection |= Dependence::DVEntry::EQ();
+      NewDirection |= Dependence::DVEntry::EQ;
     if ((DeltaMaybeNegative && CoeffMaybePositive) ||
         (DeltaMaybePositive && CoeffMaybeNegative))
-      NewDirection |= Dependence::DVEntry::GT();
+      NewDirection |= Dependence::DVEntry::GT;
     //if (NewDirection < Result.DV[Level].Direction)
     //  ++StrongSIVsuccesses;
     Result.DV[Level].Direction &= NewDirection;
@@ -1517,8 +1530,8 @@ bool DependenceInfo::weakCrossingSIVtest(const SCEV *Coeff,
   const SCEV *Delta = SE->getMinusSCEV(DstConst, SrcConst);
   LLVM_DEBUG(dbgs() << "\t    Delta = " << *Delta << "\n");
   if (Delta->isZero()) {
-    Result.DV[Level].Direction &= ~Dependence::DVEntry::LT();
-    Result.DV[Level].Direction &= ~Dependence::DVEntry::GT();
+    Result.DV[Level].Direction &= ~Dependence::DVEntry::LT;
+    Result.DV[Level].Direction &= ~Dependence::DVEntry::GT;
     ++WeakCrossingSIVsuccesses;
     if (!Result.DV[Level].Direction) {
       ++WeakCrossingSIVindependence;
@@ -1571,8 +1584,8 @@ bool DependenceInfo::weakCrossingSIVtest(const SCEV *Coeff,
     }
     if (SE->isKnownPredicate(CmpInst::ICMP_EQ, Delta, ML)) {
       // i = i' = UB
-      Result.DV[Level].Direction &= ~Dependence::DVEntry::LT();
-      Result.DV[Level].Direction &= ~Dependence::DVEntry::GT();
+      Result.DV[Level].Direction &= ~Dependence::DVEntry::LT;
+      Result.DV[Level].Direction &= ~Dependence::DVEntry::GT;
       ++WeakCrossingSIVsuccesses;
       if (!Result.DV[Level].Direction) {
         ++WeakCrossingSIVindependence;
@@ -1604,7 +1617,7 @@ bool DependenceInfo::weakCrossingSIVtest(const SCEV *Coeff,
   LLVM_DEBUG(dbgs() << "\t    Remainder = " << Remainder << "\n");
   if (Remainder != 0) {
     // Equal direction isn't possible
-    Result.DV[Level].Direction &= ~Dependence::DVEntry::EQ();
+    Result.DV[Level].Direction &= ~Dependence::DVEntry::EQ;
     ++WeakCrossingSIVsuccesses;
   }
   return false;
@@ -1866,7 +1879,7 @@ bool DependenceInfo::exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
   }
 
   // explore directions
-  auto NewDirection = Dependence::DVEntry::NONE();
+  auto NewDirection = Dependence::DVEntry::NONE;
   OverflowSafeSignedAPInt LowerDistance, UpperDistance;
   OverflowSafeSignedAPInt OTY(TY), OTX(TX), OTA(TA), OTB(TB), OTL(TL), OTU(TU);
   // NOTE: It's unclear whether these calculations can overflow. At the moment,
@@ -1886,25 +1899,25 @@ bool DependenceInfo::exactSIVtest(const SCEV *SrcCoeff, const SCEV *DstCoeff,
   LLVM_DEBUG(dbgs() << "\t    UpperDistance = " << *UpperDistance << "\n");
 
   if (LowerDistance->sle(0) && UpperDistance->sge(0)) {
-    NewDirection |= Dependence::DVEntry::EQ();
+    NewDirection |= Dependence::DVEntry::EQ;
     ++ExactSIVsuccesses;
   }
   if (LowerDistance->slt(0)) {
-    NewDirection |= Dependence::DVEntry::GT();
+    NewDirection |= Dependence::DVEntry::GT;
     ++ExactSIVsuccesses;
   }
   if (UpperDistance->sgt(0)) {
-    NewDirection |= Dependence::DVEntry::LT();
+    NewDirection |= Dependence::DVEntry::LT;
     ++ExactSIVsuccesses;
   }
 
   // finished
   Result.DV[Level].Direction &= NewDirection;
-  if (Result.DV[Level].Direction == Dependence::DVEntry::NONE())
+  if (Result.DV[Level].Direction == Dependence::DVEntry::NONE)
     ++ExactSIVindependence;
   LLVM_DEBUG(dbgs() << "\t    Result = ");
   LLVM_DEBUG(Result.dump(dbgs()));
-  return Result.DV[Level].Direction == Dependence::DVEntry::NONE();
+  return Result.DV[Level].Direction == Dependence::DVEntry::NONE;
 }
 
 // Return true if the divisor evenly divides the dividend.
@@ -1970,7 +1983,7 @@ bool DependenceInfo::weakZeroSrcSIVtest(const SCEV *DstCoeff,
   LLVM_DEBUG(dbgs() << "\t    Delta = " << *Delta << "\n");
   if (SE->isKnownPredicate(CmpInst::ICMP_EQ, SrcConst, DstConst)) {
     if (Level < CommonLevels) {
-      Result.DV[Level].Direction &= Dependence::DVEntry::GE();
+      Result.DV[Level].Direction &= Dependence::DVEntry::GE;
       Result.DV[Level].PeelFirst = true;
       ++WeakZeroSIVsuccesses;
     }
@@ -2002,7 +2015,7 @@ bool DependenceInfo::weakZeroSrcSIVtest(const SCEV *DstCoeff,
     if (SE->isKnownPredicate(CmpInst::ICMP_EQ, NewDelta, Product)) {
       // dependences caused by last iteration
       if (Level < CommonLevels) {
-        Result.DV[Level].Direction &= Dependence::DVEntry::LE();
+        Result.DV[Level].Direction &= Dependence::DVEntry::LE;
         Result.DV[Level].PeelLast = true;
         ++WeakZeroSIVsuccesses;
       }
@@ -2083,7 +2096,7 @@ bool DependenceInfo::weakZeroDstSIVtest(const SCEV *SrcCoeff,
   LLVM_DEBUG(dbgs() << "\t    Delta = " << *Delta << "\n");
   if (SE->isKnownPredicate(CmpInst::ICMP_EQ, DstConst, SrcConst)) {
     if (Level < CommonLevels) {
-      Result.DV[Level].Direction &= Dependence::DVEntry::LE();
+      Result.DV[Level].Direction &= Dependence::DVEntry::LE;
       Result.DV[Level].PeelFirst = true;
       ++WeakZeroSIVsuccesses;
     }
@@ -2115,7 +2128,7 @@ bool DependenceInfo::weakZeroDstSIVtest(const SCEV *SrcCoeff,
     if (SE->isKnownPredicate(CmpInst::ICMP_EQ, NewDelta, Product)) {
       // dependences caused by last iteration
       if (Level < CommonLevels) {
-        Result.DV[Level].Direction &= Dependence::DVEntry::GE();
+        Result.DV[Level].Direction &= Dependence::DVEntry::GE;
         Result.DV[Level].PeelLast = true;
         ++WeakZeroSIVsuccesses;
       }
@@ -2725,7 +2738,7 @@ bool DependenceInfo::gcdMIVtest(const SCEV *Src, const SCEV *Dst,
       LLVM_DEBUG(dbgs() << "\tRemainder = " << Remainder << "\n");
       if (Remainder != 0) {
         unsigned Level = mapSrcLoop(CurLoop);
-        Result.DV[Level - 1].Direction &= ~Dependence::DVEntry::EQ();
+        Result.DV[Level - 1].Direction &= ~Dependence::DVEntry::EQ;
         Improved = true;
       }
     }
@@ -2791,17 +2804,17 @@ bool DependenceInfo::banerjeeMIVtest(const SCEV *Src, const SCEV *Dst,
   LLVM_DEBUG(dbgs() << "\tBounds[*]\n");
   for (unsigned K = 1; K <= MaxLevels; ++K) {
     Bound[K].Iterations = A[K].Iterations ? A[K].Iterations : B[K].Iterations;
-    Bound[K].Direction = Dependence::DVEntry::ALL();
-    Bound[K].DirSet = Dependence::DVEntry::NONE();
+    Bound[K].Direction = Dependence::DVEntry::ALL;
+    Bound[K].DirSet = Dependence::DVEntry::NONE;
     findBoundsALL(A, B, Bound, K);
 #ifndef NDEBUG
     LLVM_DEBUG(dbgs() << "\t    " << K << '\t');
-    if (Bound[K].Lower[Dependence::DVEntry::ALL()])
-      LLVM_DEBUG(dbgs() << *Bound[K].Lower[Dependence::DVEntry::ALL()] << '\t');
+    if (Bound[K].Lower[Dependence::DVEntry::ALL])
+      LLVM_DEBUG(dbgs() << *Bound[K].Lower[Dependence::DVEntry::ALL] << '\t');
     else
       LLVM_DEBUG(dbgs() << "-inf\t");
-    if (Bound[K].Upper[Dependence::DVEntry::ALL()])
-      LLVM_DEBUG(dbgs() << *Bound[K].Upper[Dependence::DVEntry::ALL()] << '\n');
+    if (Bound[K].Upper[Dependence::DVEntry::ALL])
+      LLVM_DEBUG(dbgs() << *Bound[K].Upper[Dependence::DVEntry::ALL] << '\n');
     else
       LLVM_DEBUG(dbgs() << "+inf\n");
 #endif
@@ -2809,7 +2822,7 @@ bool DependenceInfo::banerjeeMIVtest(const SCEV *Src, const SCEV *Dst,
 
   // Test the *, *, *, ... case.
   bool Disproved = false;
-  if (testBounds(Dependence::DVEntry::ALL(), 0, Bound, Delta)) {
+  if (testBounds(Dependence::DVEntry::ALL, 0, Bound, Delta)) {
     // Explore the direction vector hierarchy.
     unsigned DepthExpanded = 0;
     unsigned NewDeps =
@@ -2863,7 +2876,7 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
                          "direction exploration is terminated.\n");
     for (unsigned K = 1; K <= CommonLevels; ++K)
       if (Loops[K])
-        Bound[K].DirSet = Dependence::DVEntry::ALL();
+        Bound[K].DirSet = Dependence::DVEntry::ALL;
     return 1;
   }
 
@@ -2875,16 +2888,16 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
         Bound[K].DirSet |= Bound[K].Direction;
 #ifndef NDEBUG
         switch (long(Bound[K].Direction)) {
-        case Dependence::DVEntry::LT():
+        case Dependence::DVEntry::LT:
           LLVM_DEBUG(dbgs() << " <");
           break;
-        case Dependence::DVEntry::EQ():
+        case Dependence::DVEntry::EQ:
           LLVM_DEBUG(dbgs() << " =");
           break;
-        case Dependence::DVEntry::GT():
+        case Dependence::DVEntry::GT:
           LLVM_DEBUG(dbgs() << " >");
           break;
-        case Dependence::DVEntry::ALL():
+        case Dependence::DVEntry::ALL:
           LLVM_DEBUG(dbgs() << " *");
           break;
         default:
@@ -2906,35 +2919,35 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
 #ifndef NDEBUG
       LLVM_DEBUG(dbgs() << "\tBound for level = " << Level << '\n');
       LLVM_DEBUG(dbgs() << "\t    <\t");
-      if (Bound[Level].Lower[Dependence::DVEntry::LT()])
-        LLVM_DEBUG(dbgs() << *Bound[Level].Lower[Dependence::DVEntry::LT()]
+      if (Bound[Level].Lower[Dependence::DVEntry::LT])
+        LLVM_DEBUG(dbgs() << *Bound[Level].Lower[Dependence::DVEntry::LT]
                           << '\t');
       else
         LLVM_DEBUG(dbgs() << "-inf\t");
-      if (Bound[Level].Upper[Dependence::DVEntry::LT()])
-        LLVM_DEBUG(dbgs() << *Bound[Level].Upper[Dependence::DVEntry::LT()]
+      if (Bound[Level].Upper[Dependence::DVEntry::LT])
+        LLVM_DEBUG(dbgs() << *Bound[Level].Upper[Dependence::DVEntry::LT]
                           << '\n');
       else
         LLVM_DEBUG(dbgs() << "+inf\n");
       LLVM_DEBUG(dbgs() << "\t    =\t");
-      if (Bound[Level].Lower[Dependence::DVEntry::EQ()])
-        LLVM_DEBUG(dbgs() << *Bound[Level].Lower[Dependence::DVEntry::EQ()]
+      if (Bound[Level].Lower[Dependence::DVEntry::EQ])
+        LLVM_DEBUG(dbgs() << *Bound[Level].Lower[Dependence::DVEntry::EQ]
                           << '\t');
       else
         LLVM_DEBUG(dbgs() << "-inf\t");
-      if (Bound[Level].Upper[Dependence::DVEntry::EQ()])
-        LLVM_DEBUG(dbgs() << *Bound[Level].Upper[Dependence::DVEntry::EQ()]
+      if (Bound[Level].Upper[Dependence::DVEntry::EQ])
+        LLVM_DEBUG(dbgs() << *Bound[Level].Upper[Dependence::DVEntry::EQ]
                           << '\n');
       else
         LLVM_DEBUG(dbgs() << "+inf\n");
       LLVM_DEBUG(dbgs() << "\t    >\t");
-      if (Bound[Level].Lower[Dependence::DVEntry::GT()])
-        LLVM_DEBUG(dbgs() << *Bound[Level].Lower[Dependence::DVEntry::GT()]
+      if (Bound[Level].Lower[Dependence::DVEntry::GT])
+        LLVM_DEBUG(dbgs() << *Bound[Level].Lower[Dependence::DVEntry::GT]
                           << '\t');
       else
         LLVM_DEBUG(dbgs() << "-inf\t");
-      if (Bound[Level].Upper[Dependence::DVEntry::GT()])
-        LLVM_DEBUG(dbgs() << *Bound[Level].Upper[Dependence::DVEntry::GT()]
+      if (Bound[Level].Upper[Dependence::DVEntry::GT])
+        LLVM_DEBUG(dbgs() << *Bound[Level].Upper[Dependence::DVEntry::GT]
                           << '\n');
       else
         LLVM_DEBUG(dbgs() << "+inf\n");
@@ -2944,21 +2957,21 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
     unsigned NewDeps = 0;
 
     // test bounds for <, *, *, ...
-    if (testBounds(Dependence::DVEntry::LT(), Level, Bound, Delta))
+    if (testBounds(Dependence::DVEntry::LT, Level, Bound, Delta))
       NewDeps += exploreDirections(Level + 1, A, B, Bound, Loops, DepthExpanded,
                                    Delta);
 
     // Test bounds for =, *, *, ...
-    if (testBounds(Dependence::DVEntry::EQ(), Level, Bound, Delta))
+    if (testBounds(Dependence::DVEntry::EQ, Level, Bound, Delta))
       NewDeps += exploreDirections(Level + 1, A, B, Bound, Loops, DepthExpanded,
                                    Delta);
 
     // test bounds for >, *, *, ...
-    if (testBounds(Dependence::DVEntry::GT(), Level, Bound, Delta))
+    if (testBounds(Dependence::DVEntry::GT, Level, Bound, Delta))
       NewDeps += exploreDirections(Level + 1, A, B, Bound, Loops, DepthExpanded,
                                    Delta);
 
-    Bound[Level].Direction = Dependence::DVEntry::ALL();
+    Bound[Level].Direction = Dependence::DVEntry::ALL;
     return NewDeps;
   } else
     return exploreDirections(Level + 1, A, B, Bound, Loops, DepthExpanded,
@@ -2966,7 +2979,7 @@ unsigned DependenceInfo::exploreDirections(unsigned Level, CoefficientInfo *A,
 }
 
 // Returns true iff the current bounds are plausible.
-bool DependenceInfo::testBounds(Dependence::DVEntryAux DirKind, unsigned Level,
+bool DependenceInfo::testBounds(DVEntryAux DirKind, unsigned Level,
                                 BoundInfo *Bound, const SCEV *Delta) const {
   Bound[Level].Direction = DirKind;
   if (const SCEV *LowerBound = getLowerBound(Bound))
@@ -2995,22 +3008,22 @@ bool DependenceInfo::testBounds(Dependence::DVEntryAux DirKind, unsigned Level,
 // and the upper bound is always >= 0.
 void DependenceInfo::findBoundsALL(CoefficientInfo *A, CoefficientInfo *B,
                                    BoundInfo *Bound, unsigned K) const {
-  Bound[K].Lower[Dependence::DVEntry::ALL()] =
+  Bound[K].Lower[Dependence::DVEntry::ALL] =
       nullptr; // Default value = -infinity.
-  Bound[K].Upper[Dependence::DVEntry::ALL()] =
+  Bound[K].Upper[Dependence::DVEntry::ALL] =
       nullptr; // Default value = +infinity.
   if (Bound[K].Iterations) {
-    Bound[K].Lower[Dependence::DVEntry::ALL()] = SE->getMulExpr(
+    Bound[K].Lower[Dependence::DVEntry::ALL] = SE->getMulExpr(
         SE->getMinusSCEV(A[K].NegPart, B[K].PosPart), Bound[K].Iterations);
-    Bound[K].Upper[Dependence::DVEntry::ALL()] = SE->getMulExpr(
+    Bound[K].Upper[Dependence::DVEntry::ALL] = SE->getMulExpr(
         SE->getMinusSCEV(A[K].PosPart, B[K].NegPart), Bound[K].Iterations);
   } else {
     // If the difference is 0, we won't need to know the number of iterations.
     if (SE->isKnownPredicate(CmpInst::ICMP_EQ, A[K].NegPart, B[K].PosPart))
-      Bound[K].Lower[Dependence::DVEntry::ALL()] =
+      Bound[K].Lower[Dependence::DVEntry::ALL] =
           SE->getZero(A[K].Coeff->getType());
     if (SE->isKnownPredicate(CmpInst::ICMP_EQ, A[K].PosPart, B[K].NegPart))
-      Bound[K].Upper[Dependence::DVEntry::ALL()] =
+      Bound[K].Upper[Dependence::DVEntry::ALL] =
           SE->getZero(A[K].Coeff->getType());
   }
 }
@@ -3032,17 +3045,17 @@ void DependenceInfo::findBoundsALL(CoefficientInfo *A, CoefficientInfo *B,
 // and the upper bound is always >= 0.
 void DependenceInfo::findBoundsEQ(CoefficientInfo *A, CoefficientInfo *B,
                                   BoundInfo *Bound, unsigned K) const {
-  Bound[K].Lower[Dependence::DVEntry::EQ()] =
+  Bound[K].Lower[Dependence::DVEntry::EQ] =
       nullptr; // Default value = -infinity.
-  Bound[K].Upper[Dependence::DVEntry::EQ()] =
+  Bound[K].Upper[Dependence::DVEntry::EQ] =
       nullptr; // Default value = +infinity.
   if (Bound[K].Iterations) {
     const SCEV *Delta = SE->getMinusSCEV(A[K].Coeff, B[K].Coeff);
     const SCEV *NegativePart = getNegativePart(Delta);
-    Bound[K].Lower[Dependence::DVEntry::EQ()] =
+    Bound[K].Lower[Dependence::DVEntry::EQ] =
         SE->getMulExpr(NegativePart, Bound[K].Iterations);
     const SCEV *PositivePart = getPositivePart(Delta);
-    Bound[K].Upper[Dependence::DVEntry::EQ()] =
+    Bound[K].Upper[Dependence::DVEntry::EQ] =
         SE->getMulExpr(PositivePart, Bound[K].Iterations);
   } else {
     // If the positive/negative part of the difference is 0,
@@ -3050,10 +3063,10 @@ void DependenceInfo::findBoundsEQ(CoefficientInfo *A, CoefficientInfo *B,
     const SCEV *Delta = SE->getMinusSCEV(A[K].Coeff, B[K].Coeff);
     const SCEV *NegativePart = getNegativePart(Delta);
     if (NegativePart->isZero())
-      Bound[K].Lower[Dependence::DVEntry::EQ()] = NegativePart; // Zero
+      Bound[K].Lower[Dependence::DVEntry::EQ] = NegativePart; // Zero
     const SCEV *PositivePart = getPositivePart(Delta);
     if (PositivePart->isZero())
-      Bound[K].Upper[Dependence::DVEntry::EQ()] = PositivePart; // Zero
+      Bound[K].Upper[Dependence::DVEntry::EQ] = PositivePart; // Zero
   }
 }
 
@@ -3072,20 +3085,20 @@ void DependenceInfo::findBoundsEQ(CoefficientInfo *A, CoefficientInfo *B,
 // We must be careful to handle the case where the upper bound is unknown.
 void DependenceInfo::findBoundsLT(CoefficientInfo *A, CoefficientInfo *B,
                                   BoundInfo *Bound, unsigned K) const {
-  Bound[K].Lower[Dependence::DVEntry::LT()] =
+  Bound[K].Lower[Dependence::DVEntry::LT] =
       nullptr; // Default value = -infinity.
-  Bound[K].Upper[Dependence::DVEntry::LT()] =
+  Bound[K].Upper[Dependence::DVEntry::LT] =
       nullptr; // Default value = +infinity.
   if (Bound[K].Iterations) {
     const SCEV *Iter_1 = SE->getMinusSCEV(
         Bound[K].Iterations, SE->getOne(Bound[K].Iterations->getType()));
     const SCEV *NegPart =
         getNegativePart(SE->getMinusSCEV(A[K].NegPart, B[K].Coeff));
-    Bound[K].Lower[Dependence::DVEntry::LT()] =
+    Bound[K].Lower[Dependence::DVEntry::LT] =
         SE->getMinusSCEV(SE->getMulExpr(NegPart, Iter_1), B[K].Coeff);
     const SCEV *PosPart =
         getPositivePart(SE->getMinusSCEV(A[K].PosPart, B[K].Coeff));
-    Bound[K].Upper[Dependence::DVEntry::LT()] =
+    Bound[K].Upper[Dependence::DVEntry::LT] =
         SE->getMinusSCEV(SE->getMulExpr(PosPart, Iter_1), B[K].Coeff);
   } else {
     // If the positive/negative part of the difference is 0,
@@ -3093,11 +3106,11 @@ void DependenceInfo::findBoundsLT(CoefficientInfo *A, CoefficientInfo *B,
     const SCEV *NegPart =
         getNegativePart(SE->getMinusSCEV(A[K].NegPart, B[K].Coeff));
     if (NegPart->isZero())
-      Bound[K].Lower[Dependence::DVEntry::LT()] = SE->getNegativeSCEV(B[K].Coeff);
+      Bound[K].Lower[Dependence::DVEntry::LT] = SE->getNegativeSCEV(B[K].Coeff);
     const SCEV *PosPart =
         getPositivePart(SE->getMinusSCEV(A[K].PosPart, B[K].Coeff));
     if (PosPart->isZero())
-      Bound[K].Upper[Dependence::DVEntry::LT()] = SE->getNegativeSCEV(B[K].Coeff);
+      Bound[K].Upper[Dependence::DVEntry::LT] = SE->getNegativeSCEV(B[K].Coeff);
   }
 }
 
@@ -3116,20 +3129,20 @@ void DependenceInfo::findBoundsLT(CoefficientInfo *A, CoefficientInfo *B,
 // We must be careful to handle the case where the upper bound is unknown.
 void DependenceInfo::findBoundsGT(CoefficientInfo *A, CoefficientInfo *B,
                                   BoundInfo *Bound, unsigned K) const {
-  Bound[K].Lower[Dependence::DVEntry::GT()] =
+  Bound[K].Lower[Dependence::DVEntry::GT] =
       nullptr; // Default value = -infinity.
-  Bound[K].Upper[Dependence::DVEntry::GT()] =
+  Bound[K].Upper[Dependence::DVEntry::GT] =
       nullptr; // Default value = +infinity.
   if (Bound[K].Iterations) {
     const SCEV *Iter_1 = SE->getMinusSCEV(
         Bound[K].Iterations, SE->getOne(Bound[K].Iterations->getType()));
     const SCEV *NegPart =
         getNegativePart(SE->getMinusSCEV(A[K].Coeff, B[K].PosPart));
-    Bound[K].Lower[Dependence::DVEntry::GT()] =
+    Bound[K].Lower[Dependence::DVEntry::GT] =
         SE->getAddExpr(SE->getMulExpr(NegPart, Iter_1), A[K].Coeff);
     const SCEV *PosPart =
         getPositivePart(SE->getMinusSCEV(A[K].Coeff, B[K].NegPart));
-    Bound[K].Upper[Dependence::DVEntry::GT()] =
+    Bound[K].Upper[Dependence::DVEntry::GT] =
         SE->getAddExpr(SE->getMulExpr(PosPart, Iter_1), A[K].Coeff);
   } else {
     // If the positive/negative part of the difference is 0,
@@ -3137,11 +3150,11 @@ void DependenceInfo::findBoundsGT(CoefficientInfo *A, CoefficientInfo *B,
     const SCEV *NegPart =
         getNegativePart(SE->getMinusSCEV(A[K].Coeff, B[K].PosPart));
     if (NegPart->isZero())
-      Bound[K].Lower[Dependence::DVEntry::GT()] = A[K].Coeff;
+      Bound[K].Lower[Dependence::DVEntry::GT] = A[K].Coeff;
     const SCEV *PosPart =
         getPositivePart(SE->getMinusSCEV(A[K].Coeff, B[K].NegPart));
     if (PosPart->isZero())
-      Bound[K].Upper[Dependence::DVEntry::GT()] = A[K].Coeff;
+      Bound[K].Upper[Dependence::DVEntry::GT] = A[K].Coeff;
   }
 }
 
@@ -3673,7 +3686,7 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   // TODO: Ideally, the distance should be set to 0 immediately simultaneously
   // with the corresponding direction being set to EQ.
   for (unsigned II = 1; II <= Result.getLevels(); ++II) {
-    if (Result.getDirection(II) == Dependence::DVEntry::EQ()) {
+    if (Result.getDirection(II) == Dependence::DVEntry::EQ) {
       if (Result.DV[II - 1].Distance == nullptr)
         Result.DV[II - 1].Distance = SE->getZero(SrcSCEV->getType());
       else
@@ -3686,7 +3699,7 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     // direction is EQ) holds.
     const SCEV *Distance = Result.getDistance(II);
     if (Distance && Distance->isZero())
-      assert(Result.getDirection(II) == Dependence::DVEntry::EQ() &&
+      assert(Result.getDirection(II) == Dependence::DVEntry::EQ &&
              "Distance is zero, but direction is not EQ");
 #endif
   }
@@ -3717,7 +3730,7 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     // All directions must include equal, otherwise no
     // loop-independent dependence is possible.
     for (unsigned II = 1; II <= CommonLevels; ++II) {
-      if (!(Result.getDirection(II) & Dependence::DVEntry::EQ())) {
+      if (!(Result.getDirection(II) & Dependence::DVEntry::EQ)) {
         Result.LoopIndependent = false;
         break;
       }
@@ -3728,7 +3741,7 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     // However, if there are runtime assumptions, we must return the result.
     bool AllEqual = true;
     for (unsigned II = 1; II <= CommonLevels; ++II) {
-      if (Result.getDirection(II) != Dependence::DVEntry::EQ()) {
+      if (Result.getDirection(II) != Dependence::DVEntry::EQ) {
         AllEqual = false;
         break;
       }

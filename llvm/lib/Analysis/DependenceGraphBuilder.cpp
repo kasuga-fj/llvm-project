@@ -339,14 +339,14 @@ void AbstractDependenceGraphBuilder<G>::createMemoryDependencyEdges() {
           else if (D->isOrdered() && !D->isLoopIndependent()) {
             bool ReversedEdge = false;
             for (unsigned Level = 1; Level <= D->getLevels(); ++Level) {
-              if (D->getDirection(Level) == Dependence::DVEntry::EQ())
+              if (D->getDirection(Level) == Dependence::DVEntry::EQ)
                 continue;
-              else if (D->getDirection(Level) == Dependence::DVEntry::GT()) {
+              else if (D->getDirection(Level) == Dependence::DVEntry::GT) {
                 createBackwardEdge(**SrcIt, **DstIt);
                 ReversedEdge = true;
                 ++TotalEdgeReversals;
                 break;
-              } else if (D->getDirection(Level) == Dependence::DVEntry::LT())
+              } else if (D->getDirection(Level) == Dependence::DVEntry::LT)
                 break;
               else {
                 createConfusedEdges(**SrcIt, **DstIt);

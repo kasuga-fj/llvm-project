@@ -652,10 +652,10 @@ static bool preservesForwardDependence(Instruction *Src, Instruction *Dst,
   for (unsigned CurLoopDepth = UnrollLevel + 1; CurLoopDepth <= JamLevel;
        ++CurLoopDepth) {
     auto JammedDir = D->getDirection(CurLoopDepth);
-    if (JammedDir == Dependence::DVEntry::LT())
+    if (JammedDir == Dependence::DVEntry::LT)
       return true;
 
-    if (JammedDir & Dependence::DVEntry::GT())
+    if (JammedDir & Dependence::DVEntry::GT)
       return false;
   }
 
@@ -669,10 +669,10 @@ static bool preservesBackwardDependence(Instruction *Src, Instruction *Dst,
   for (unsigned CurLoopDepth = UnrollLevel + 1; CurLoopDepth <= JamLevel;
        ++CurLoopDepth) {
     auto JammedDir = D->getDirection(CurLoopDepth);
-    if (JammedDir == Dependence::DVEntry::GT())
+    if (JammedDir == Dependence::DVEntry::GT)
       return true;
 
-    if (JammedDir & Dependence::DVEntry::LT())
+    if (JammedDir & Dependence::DVEntry::LT)
       return false;
   }
 
@@ -727,7 +727,7 @@ static bool checkDependency(Instruction *Src, Instruction *Dst,
   // overlap in memory. We assumes the indexes never overlap into neighboring
   // dimensions.
   for (unsigned CurLoopDepth = 1; CurLoopDepth < UnrollLevel; ++CurLoopDepth)
-    if (!(D->getDirection(CurLoopDepth) & Dependence::DVEntry::EQ()))
+    if (!(D->getDirection(CurLoopDepth) & Dependence::DVEntry::EQ))
       return true;
 
   auto UnrollDirection = D->getDirection(UnrollLevel);
@@ -735,15 +735,15 @@ static bool checkDependency(Instruction *Src, Instruction *Dst,
   // If the distance carried by the unrolled loop is 0, then after unrolling
   // that distance will become non-zero resulting in non-overlapping accesses in
   // the inner loops.
-  if (UnrollDirection == Dependence::DVEntry::EQ())
+  if (UnrollDirection == Dependence::DVEntry::EQ)
     return true;
 
-  if (UnrollDirection & Dependence::DVEntry::LT() &&
+  if (UnrollDirection & Dependence::DVEntry::LT &&
       !preservesForwardDependence(Src, Dst, UnrollLevel, JamLevel,
                                   Sequentialized, D.get()))
     return false;
 
-  if (UnrollDirection & Dependence::DVEntry::GT() &&
+  if (UnrollDirection & Dependence::DVEntry::GT &&
       !preservesBackwardDependence(Src, Dst, UnrollLevel, JamLevel,
                                    Sequentialized, D.get()))
     return false;

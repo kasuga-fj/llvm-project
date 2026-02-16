@@ -1270,7 +1270,7 @@ private:
         // Check if the direction vector does not include equality. If an outer
         // loop has a non-equal direction, outer indicies are different and it
         // is safe to fuse.
-        if (!(Direction & Dependence::DVEntry::EQ())) {
+        if (!(Direction & Dependence::DVEntry::EQ)) {
           LLVM_DEBUG(dbgs() << "Safe to fuse due to non-equal acceses in the "
                                "outer loops\n");
           NumDA++;
@@ -1289,7 +1289,7 @@ private:
       //        A[i] = ...;
       //    for (int i = 0; i < n; i++)
       //        ... = A[i-1];
-      if (!(CurDir & Dependence::DVEntry::GT())) {
+      if (!(CurDir & Dependence::DVEntry::GT)) {
         LLVM_DEBUG(dbgs() << "Safe to fuse with no backward loop-carried "
                              "dependency\n");
         NumDA++;
