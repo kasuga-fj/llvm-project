@@ -205,13 +205,13 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
                     << " Loads and Stores to analyze\n");
   bool CheckNumMem = [&] {
     unsigned NumMem = MemInstr.size();
-    if (MaxMemInstrCount <= NumMem)
+    if (NumMem <= MaxMemInstrCount)
       return true;
     if (NumMem * NumMem <= MaxMemoryIntensityFactor * NumInsts)
       return true;
     return false;
   }();
-  if (CheckNumMem) {
+  if (!CheckNumMem) {
     LLVM_DEBUG(dbgs() << "The transform doesn't support more than "
                       << MaxMemInstrCount << " load/stores in a loop\n");
     ORE->emit([&]() {
