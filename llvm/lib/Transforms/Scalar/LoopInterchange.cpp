@@ -62,11 +62,15 @@ static cl::opt<int> LoopInterchangeCostThreshold(
 
 // Maximum number of load-stores that can be handled in the dependency matrix.
 static cl::opt<unsigned int> MaxMemInstrCount(
-    "loop-interchange-max-meminstr-count", cl::init(64), cl::Hidden,
+    "loop-interchange-max-meminstr-count", cl::init(20), cl::Hidden,
     cl::desc(
         "Maximum number of load-store instructions that should be handled "
         "in the dependency matrix. Higher value may lead to more interchanges "
         "at the cost of compile-time"));
+
+static cl::opt<unsigned int> MaxMemoryIntensityFactor(
+    "loop-interchange-max-memory-intensity-factor", cl::init(4), cl::Hidden,
+    cl::desc("TODO"));
 
 namespace {
 
@@ -176,6 +180,7 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
   using ValueVector = SmallVector<Value *, 16>;
 
   ValueVector MemInstr;
+  unsigned NumInsts = 0;
 
   // For each block.
   for (BasicBlock *BB : L->blocks()) {
@@ -183,6 +188,7 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
     for (Instruction &I : *BB) {
       if (!isa<Instruction>(I))
         return false;
+      NumInsts++;
       if (auto *Ld = dyn_cast<LoadInst>(&I)) {
         if (!Ld->isSimple())
           return false;
@@ -197,7 +203,15 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
 
   LLVM_DEBUG(dbgs() << "Found " << MemInstr.size()
                     << " Loads and Stores to analyze\n");
-  if (MemInstr.size() > MaxMemInstrCount) {
+  bool CheckNumMem = [&] {
+    unsigned NumMem = MemInstr.size();
+    if (MaxMemInstrCount <= NumMem)
+      return true;
+    if (NumMem * NumMem <= MaxMemoryIntensityFactor * NumInsts)
+      return true;
+    return false;
+  }();
+  if (CheckNumMem) {
     LLVM_DEBUG(dbgs() << "The transform doesn't support more than "
                       << MaxMemInstrCount << " load/stores in a loop\n");
     ORE->emit([&]() {
