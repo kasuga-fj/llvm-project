@@ -801,10 +801,51 @@ bool llvm::getIndexExpressionsFromGEP(ScalarEvolution &SE,
 
 namespace {
 
+void collectTC(ScalarEvolution &SE, const Loop *L,
+               DenseMap<const SCEV *, const SCEV *> &Map) {
+  const SCEV *BTC = SE.getBackedgeTakenCount(L);
+  IntegerType *IntTy = dyn_cast<IntegerType>(BTC->getType());
+  const SCEV *TripCount = SE.getAddExpr(BTC, SE.getOne(IntTy));
+  dbgs() << "TripCount for loop " << L->getHeader()->getName() << ": "
+         << *TripCount << "\n";
+  auto [Ite, Inserted] = Map.try_emplace(
+      TripCount,
+      SE.getSMaxExpr(SE.getZero(IntTy),
+                     SE.getSMinExpr(TripCount, SE.getConstant(IntTy, 53))));
+  if (Inserted) {
+    dbgs() << "Adding TripCount rewrite: " << *TripCount << " -> "
+           << *Ite->second << "\n";
+  }
+
+  for (const Loop *Child : L->getSubLoops())
+    collectTC(SE, Child, Map);
+}
+
+struct MySCEVRewriter : public SCEVRewriteVisitor<MySCEVRewriter> {
+  using SCEVRewriteVisitor::visit;
+
+  MySCEVRewriter(ScalarEvolution &SE,
+                 const DenseMap<const SCEV *, const SCEV *> &Map)
+      : SCEVRewriteVisitor(SE) {
+    for (const auto &KV : Map)
+      RewriteResults[KV.first] = KV.second;
+  }
+
+  static MySCEVRewriter create(ScalarEvolution &SE, LoopInfo &LI) {
+    DenseMap<const SCEV *, const SCEV *> Map;
+    for (const Loop *L : LI.getTopLevelLoops())
+      collectTC(SE, L, Map);
+    return MySCEVRewriter(SE, Map);
+  }
+};
+
 void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
                           ScalarEvolution *SE) {
   O << "Printing analysis 'Delinearization' for function '" << F->getName()
     << "':";
+
+  MySCEVRewriter Rewriter = MySCEVRewriter::create(*SE, *LI);
+
   for (Instruction &Inst : instructions(F)) {
     // Only analyze loads and stores.
     if (!isa<StoreInst>(&Inst) && !isa<LoadInst>(&Inst))
@@ -829,6 +870,9 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
     O << "\n";
     O << "Inst:" << Inst << "\n";
     O << "AccessFunction: " << *AccessFn << "\n";
+
+    // AccessFn = Rewriter.visit(AccessFn);
+    // O << "Rewritten: " << *AccessFn << "\n";
 
     SmallVector<const SCEV *, 3> Subscripts, Sizes;
 
