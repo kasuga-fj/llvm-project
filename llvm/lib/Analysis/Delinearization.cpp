@@ -839,6 +839,170 @@ struct MySCEVRewriter : public SCEVRewriteVisitor<MySCEVRewriter> {
   }
 };
 
+struct RelaxedStrides {
+  SmallVector<std::pair<const SCEV *, const Loop *>, 4> Strides;
+  const SCEV *Const;
+
+  static std::optional<RelaxedStrides> create(ScalarEvolution &SE,
+                                              const SCEV *Expr,
+                                              const SCEV *EltSize,
+                                              const Loop *OutermostLoop);
+
+  bool validate(ScalarEvolution &SE, const SCEV *EltSize) const;
+
+  void relaxedDelinarize(ScalarEvolution &SE,
+                         SmallVectorImpl<const SCEV *> &Sizes,
+                         SmallVectorImpl<const SCEV *> &Subscripts) const;
+
+private:
+  bool sort(ScalarEvolution &SE);
+};
+
+std::optional<const SCEV *> quotientIfDivisible(ScalarEvolution &SE,
+                                                const SCEV *Numerator,
+                                                const SCEV *Denominator) {
+  const SCEV *Q, *R;
+  SCEVDivision::divide(SE, Numerator, Denominator, &Q, &R);
+  if (!R->isZero())
+    return std::nullopt;
+  return Q;
+}
+
+bool collectRelaxedStridesAux(ScalarEvolution &SE, const SCEV *Expr,
+                              RelaxedStrides &RS, const Loop *OutermostLoop,
+                              const SCEV *EltSize) {
+  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(Expr);
+  if (!AR || !AR->isAffine()) {
+    if (!SE.isLoopInvariant(Expr, OutermostLoop))
+      return false;
+
+    std::optional<const SCEV *> Q = quotientIfDivisible(SE, Expr, EltSize);
+    if (!Q)
+      return false;
+
+    RS.Const = *Q;
+    return true;
+  }
+
+  const SCEV *Step = AR->getStepRecurrence(SE);
+  std::optional<const SCEV *> Q = quotientIfDivisible(SE, Step, EltSize);
+  if (!Q)
+    return false;
+  RS.Strides.push_back({*Q, AR->getLoop()});
+  return collectRelaxedStridesAux(SE, AR->getStart(), RS, OutermostLoop,
+                                  EltSize);
+}
+
+std::optional<RelaxedStrides>
+RelaxedStrides::create(ScalarEvolution &SE, const SCEV *Expr,
+                       const SCEV *EltSize, const Loop *OutermostLoop) {
+  RelaxedStrides RS;
+  if (!collectRelaxedStridesAux(SE, Expr, RS, OutermostLoop, EltSize))
+    return std::nullopt;
+
+  if (!RS.sort(SE))
+    return std::nullopt;
+
+  if (!RS.validate(SE, EltSize))
+    return std::nullopt;
+
+  // TODO: Handle Const.
+
+  return RS;
+}
+
+bool RelaxedStrides::sort(ScalarEvolution &SE) {
+  unsigned N = Strides.size();
+#ifndef NDEBUG
+  LLVM_DEBUG(dbgs() << "RelaxedStrides::sort:\n");
+  for (const auto &[Stride, Loop] : Strides) {
+    LLVM_DEBUG(dbgs() << "Stride: " << *Stride
+                      << " Loop: " << Loop->getHeader()->getName() << "\n");
+  }
+#endif
+  for (unsigned UB = N; 0 < UB; UB--) {
+    for (unsigned I = 0; I + 1 < UB; I++) {
+      LLVM_DEBUG(dbgs() << "I: " << I << " J: " << (I + 1) << "\n");
+      unsigned J = I + 1;
+      const SCEV *SI = Strides[I].first;
+      const SCEV *SJ = Strides[J].first;
+      if (SE.isKnownPredicate(ICmpInst::ICMP_SLE, SI, SJ))
+        continue;
+      if (SE.isKnownPredicate(ICmpInst::ICMP_SGE, SI, SJ)) {
+        std::swap(Strides[I], Strides[J]);
+        continue;
+      }
+
+      LLVM_DEBUG(dbgs() << "Cannot determine order of strides: " << *SI
+                        << " and " << *SJ << "\n");
+      LLVM_DEBUG(SE.getSignedRange(SI).dump());
+      LLVM_DEBUG(SE.getSignedRange(SJ).dump());
+      return false;
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "sorted\n");
+
+  for (unsigned I = 0; I < N; I++) {
+    const SCEV *SI = Strides[I].first;
+    for (unsigned J = I + 1; J < N; J++) {
+      const SCEV *SJ = Strides[J].first;
+      if (!SE.isKnownPredicate(ICmpInst::ICMP_SLE, SI, SJ))
+        return false;
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "verified sorted strides\n");
+
+  return true;
+}
+
+void RelaxedStrides::relaxedDelinarize(
+    ScalarEvolution &SE, SmallVectorImpl<const SCEV *> &Sizes,
+    SmallVectorImpl<const SCEV *> &Subscripts) const {
+  const SCEV *Zero = SE.getZero(Strides[0].first->getType());
+  const SCEV *One = SE.getOne(Strides[0].first->getType());
+  for (const auto &[Stride, Loop] : Strides) {
+    Sizes.push_back(Stride);
+    Subscripts.push_back(
+        SE.getAddRecExpr(Zero, One, Loop, SCEV::NoWrapFlags::FlagAnyWrap));
+  }
+
+  std::reverse(Sizes.begin(), Sizes.end());
+  std::reverse(Subscripts.begin(), Subscripts.end());
+}
+
+bool RelaxedStrides::validate(ScalarEvolution &SE, const SCEV *EltSize) const {
+  const SCEV *Zero = SE.getZero(EltSize->getType());
+  const SCEV *Acc = Zero;
+
+  auto AddOverflow = [&](const SCEV *A, const SCEV *B) -> const SCEV * {
+    if (!SE.willNotOverflow(Instruction::Add, /*IsSigned=*/true, A, B))
+      return nullptr;
+    return SE.getAddExpr(A, B);
+  };
+
+  for (const auto &[Stride, Loop] : Strides) {
+    LLVM_DEBUG(dbgs() << "Validating stride: " << *Stride << " for loop "
+                      << Loop->getHeader()->getName() << "\n");
+    LLVM_DEBUG(dbgs() << "Current Acc: " << *Acc << "\n");
+    if (!SE.isKnownPredicate(ICmpInst::ICMP_SLT, Acc, Stride))
+      return false;
+    const SCEV *AR =
+        SE.getAddRecExpr(Zero, Stride, Loop, SCEV::NoWrapFlags::FlagAnyWrap);
+    // TODO: Maybe need to check no-wrap flags of AR.
+    LLVM_DEBUG(dbgs() << "Adding to Acc: " << *Acc << " + " << *AR << "\n");
+    Acc = AddOverflow(Acc, AR);
+    if (!Acc)
+      return false;
+  }
+
+  LLVM_DEBUG(dbgs() << "Total Acc: " << *Acc << "\n");
+  if (!SE.willNotOverflow(Instruction::Mul, /*IsSigned=*/true, Acc, EltSize))
+    return false;
+  return true;
+}
+
 void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
                           ScalarEvolution *SE) {
   O << "Printing analysis 'Delinearization' for function '" << F->getName()
@@ -909,6 +1073,26 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
       bool IsValid = validateDelinearizationResult(*SE, Sizes, Subscripts);
       O << "Delinearization validation: " << (IsValid ? "Succeeded" : "Failed")
         << "\n";
+
+      const SCEV *EltSize = SE->getElementSize(&Inst);
+      if (const auto RS = RelaxedStrides::create(*SE, AccessFn, EltSize,
+                                                 L->getOutermostLoop())) {
+        SmallVector<const SCEV *, 4> RelaxedSizes, RelaxedSubscripts;
+        RS->relaxedDelinarize(*SE, RelaxedSizes, RelaxedSubscripts);
+        O << "Relaxed delinearization result:\n";
+        O << "ArrayDecl[UnknownSize]";
+        int Size = Subscripts.size();
+        for (int I = 0; I < Size; I++)
+          O << "[" << *Sizes[I] << "]";
+        O << " with elements of " << *EltSize << " bytes.\n";
+
+        O << "ArrayRef";
+        for (int I = 0; I < Size; I++)
+          O << "[" << *Subscripts[I] << "]";
+        O << "\n";
+      } else {
+        O << "Relaxed delinearization failed.\n";
+      }
   }
 }
 

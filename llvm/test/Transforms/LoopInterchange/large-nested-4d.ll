@@ -65,11 +65,11 @@ define void @test(ptr noalias readonly captures(none) %0, ptr noalias readonly c
 entry:
   %17 = load i32, ptr %7, align 4
   %kasu.0 = sext i32 %17 to i64
-  %kasu.1 = call i64 @llvm.smax.i64(i64 0, i64 %kasu.0)
+  %kasu.1 = call i64 @llvm.smax.i64(i64 1, i64 %kasu.0)
   %18 = call i64 @llvm.smin.i64(i64 54, i64 %kasu.1)
   %20 = load i32, ptr %8, align 4
   %kasu.2 = sext i32 %20 to i64
-  %kasu.3 = call i64 @llvm.smax.i64(i64 0, i64 %kasu.2)
+  %kasu.3 = call i64 @llvm.smax.i64(i64 1, i64 %kasu.2)
   %21 = call i64 @llvm.smin.i64(i64 54, i64 %kasu.3)
   %cmp1 = icmp sgt i32 %17, 0
   %cmp2 = icmp sgt i32 %20, 0
