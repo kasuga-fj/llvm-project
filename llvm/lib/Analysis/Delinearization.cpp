@@ -801,6 +801,156 @@ bool llvm::getIndexExpressionsFromGEP(ScalarEvolution &SE,
 
 namespace {
 
+struct OverflowSafeSignedAPInt {
+  OverflowSafeSignedAPInt() : Value(std::nullopt) {}
+  OverflowSafeSignedAPInt(const APInt &V) : Value(V) {}
+  OverflowSafeSignedAPInt(const std::optional<APInt> &V) : Value(V) {}
+
+  OverflowSafeSignedAPInt operator+(const OverflowSafeSignedAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSafeSignedAPInt();
+    bool Overflow;
+    APInt Result = Value->sadd_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSafeSignedAPInt();
+    return OverflowSafeSignedAPInt(Result);
+  }
+
+  OverflowSafeSignedAPInt operator+(int RHS) const {
+    if (!Value)
+      return OverflowSafeSignedAPInt();
+    return *this + fromInt(RHS);
+  }
+
+  OverflowSafeSignedAPInt operator-(const OverflowSafeSignedAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSafeSignedAPInt();
+    bool Overflow;
+    APInt Result = Value->ssub_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSafeSignedAPInt();
+    return OverflowSafeSignedAPInt(Result);
+  }
+
+  OverflowSafeSignedAPInt operator-(int RHS) const {
+    if (!Value)
+      return OverflowSafeSignedAPInt();
+    return *this - fromInt(RHS);
+  }
+
+  OverflowSafeSignedAPInt operator*(const OverflowSafeSignedAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSafeSignedAPInt();
+    bool Overflow;
+    APInt Result = Value->smul_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSafeSignedAPInt();
+    return OverflowSafeSignedAPInt(Result);
+  }
+
+  OverflowSafeSignedAPInt operator-() const {
+    if (!Value)
+      return OverflowSafeSignedAPInt();
+    if (Value->isMinSignedValue())
+      return OverflowSafeSignedAPInt();
+    return OverflowSafeSignedAPInt(-*Value);
+  }
+
+  operator bool() const { return Value.has_value(); }
+
+  bool operator!() const { return !Value.has_value(); }
+
+  const APInt &operator*() const {
+    assert(Value && "Value is not available.");
+    return *Value;
+  }
+
+  const APInt *operator->() const {
+    assert(Value && "Value is not available.");
+    return &*Value;
+  }
+
+private:
+  /// Underlying value. std::nullopt means "unknown". An arithmetic operation on
+  /// "unknown" always produces "unknown".
+  std::optional<APInt> Value;
+
+  OverflowSafeSignedAPInt fromInt(uint64_t V) const {
+    assert(Value && "Value is not available.");
+    return OverflowSafeSignedAPInt(
+        APInt(Value->getBitWidth(), V, /*isSigned=*/true));
+  }
+};
+
+struct ExecutionDomain {
+  ExecutionDomain(ScalarEvolution &SE) : SE(SE) {}
+
+  void smin(const SCEV *S, const APInt &RHS) {
+    auto Ite = fetch(S);
+    Ite->second = Ite->second.intersectWith(
+        ConstantRange::makeExactICmpRegion(ICmpInst::ICMP_SLT, RHS));
+  }
+
+  void smax(const SCEV *S, const APInt &RHS) {
+    auto Ite = fetch(S);
+    Ite->second = Ite->second.intersectWith(
+        ConstantRange::makeExactICmpRegion(ICmpInst::ICMP_SGE, RHS));
+  }
+
+  void clamp(const APInt &Min, const SCEV *S, const APInt &Max) {
+    auto Ite = fetch(S);
+    Ite->second = Ite->second.intersectWith(ConstantRange(Min, Max + 1));
+  }
+
+  bool isKnownNonNegative(const SCEV *S) {
+    auto Ite = Ranges.find(S);
+    if (Ite != Ranges.end() && Ite->second.getSignedMin().isNonNegative())
+      return true;
+    return SE.isKnownNonNegative(S);
+  }
+
+  bool isKnownNonPositive(const SCEV *S) {
+    auto Ite = Ranges.find(S);
+    if (Ite != Ranges.end() && Ite->second.getSignedMin().isNonPositive())
+      return true;
+    return SE.isKnownNonPositive(S);
+  }
+
+private:
+  using Cache = DenseMap<const SCEV *, ConstantRange>;
+  ScalarEvolution &SE;
+  DenseMap<const SCEV *, ConstantRange> Ranges;
+
+  Cache::iterator fetch(const SCEV *S) {
+    return Ranges.try_emplace(S, SE.getSignedRange(S)).first;
+  }
+};
+
+const SCEV *findMax(const SCEV *S, ScalarEvolution &SE, ExecutionDomain &ED) {
+  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S);
+  if (!AR)
+    return S;
+
+  if (!AR->isAffine() || !AR->hasNoSignedWrap())
+    return nullptr;
+
+  const SCEV *Rec = findMax(AR->getStart(), SE, ED);
+  if (!Rec)
+    return nullptr;
+
+  const SCEV *Step = AR->getStepRecurrence(SE);
+  if (ED.isKnownNonNegative(Step)) {
+    const SCEV *BTC = SE.getBackedgeTakenCount(AR->getLoop());
+    return dyn_cast<SCEVAddRecExpr>(
+               SE.getAddRecExpr(Rec, Step, AR->getLoop(), AR->getNoWrapFlags()))
+        ->evaluateAtIteration(BTC, SE);
+  }
+  if (ED.isKnownNonPositive(Step)) {
+    return Rec;
+  }
+  return nullptr;
+}
+
 void collectTC(ScalarEvolution &SE, const Loop *L,
                DenseMap<const SCEV *, const SCEV *> &Map) {
   const SCEV *BTC = SE.getBackedgeTakenCount(L);
@@ -913,13 +1063,11 @@ RelaxedStrides::create(ScalarEvolution &SE, const SCEV *Expr,
 
 bool RelaxedStrides::sort(ScalarEvolution &SE) {
   unsigned N = Strides.size();
-#ifndef NDEBUG
-  LLVM_DEBUG(dbgs() << "RelaxedStrides::sort:\n");
+  dbgs() << "RelaxedStrides::sort:\n";
   for (const auto &[Stride, Loop] : Strides) {
-    LLVM_DEBUG(dbgs() << "Stride: " << *Stride
-                      << " Loop: " << Loop->getHeader()->getName() << "\n");
+    dbgs() << "Stride: " << *Stride << " Loop: " << Loop->getHeader()->getName()
+           << "\n";
   }
-#endif
   for (unsigned UB = N; 0 < UB; UB--) {
     for (unsigned I = 0; I + 1 < UB; I++) {
       LLVM_DEBUG(dbgs() << "I: " << I << " J: " << (I + 1) << "\n");
@@ -972,6 +1120,85 @@ void RelaxedStrides::relaxedDelinarize(
   std::reverse(Subscripts.begin(), Subscripts.end());
 }
 
+enum Monotonicity {
+  Increasing,
+  Decreasing,
+  Constant,
+  Unknown,
+};
+
+struct SCEVMonotonicityVisitor
+    : public SCEVVisitor<SCEVMonotonicityVisitor, Monotonicity> {
+  using Base = SCEVVisitor<SCEVMonotonicityVisitor, Monotonicity>;
+
+  SCEVMonotonicityVisitor(const SCEV *Var) : Var(Var) {}
+
+  static Monotonicity evaluate(const SCEV *S, const SCEV *Var) {
+    return SCEVMonotonicityVisitor(Var).visit(S);
+  }
+
+  Monotonicity visit(const SCEV *S) {
+    if (S == Var)
+      return Increasing;
+    return Base::visit(S);
+  }
+
+  Monotonicity visitConstant(const SCEVConstant *) { return Constant; }
+
+  Monotonicity visitVScale(const SCEVVScale *) { return Constant; }
+
+  Monotonicity visitAddExpr(const SCEVAddExpr *S) { return visitNaryExpr(S); }
+
+  Monotonicity visitMulExpr(const SCEVMulExpr *S) { return visitNaryExpr(S); }
+
+  Monotonicity visitSignExtendExpr(const SCEVSignExtendExpr *S) {
+    return visit(S->getOperand());
+  }
+
+  Monotonicity visitSMinExpr(const SCEVSMinExpr *S) { return visitNaryExpr(S); }
+
+  Monotonicity visitSMaxExpr(const SCEVSMaxExpr *S) { return visitNaryExpr(S); }
+
+  Monotonicity visitPtrToAddrExpr(const SCEVPtrToAddrExpr *) { return Unknown; }
+  Monotonicity visitPtrToIntExpr(const SCEVPtrToIntExpr *) { return Unknown; }
+  Monotonicity visitTruncateExpr(const SCEVTruncateExpr *) { return Unknown; }
+  Monotonicity visitZeroExtendExpr(const SCEVZeroExtendExpr *) {
+    return Unknown;
+  }
+  Monotonicity visitUDivExpr(const SCEVUDivExpr *) { return Unknown; }
+  Monotonicity visitAddRecExpr(const SCEVAddRecExpr *) { return Unknown; }
+  Monotonicity visitUMaxExpr(const SCEVUMaxExpr *) { return Unknown; }
+  Monotonicity visitUMinExpr(const SCEVUMinExpr *) { return Unknown; }
+  Monotonicity visitUnknown(const SCEVUnknown *) { return Unknown; }
+  Monotonicity visitSequentialUMinExpr(const SCEVSequentialUMinExpr *) {
+    return Unknown;
+  }
+
+private:
+  const SCEV *Var;
+
+  Monotonicity visitNaryExpr(const SCEVNAryExpr *S) {
+    if (!S->hasNoSignedWrap())
+      return Unknown;
+
+    Monotonicity Result = Constant;
+    for (const SCEV *Op : S->operands()) {
+      Monotonicity OpMono = visit(Op);
+      if (OpMono == Unknown)
+        return Unknown;
+      if (Result == Constant) {
+        Result = OpMono;
+        continue;
+      }
+      if (OpMono == Constant)
+        continue;
+      if (Result != OpMono)
+        return Unknown;
+    }
+    return Result;
+  }
+};
+
 bool RelaxedStrides::validate(ScalarEvolution &SE, const SCEV *EltSize) const {
   const SCEV *Zero = SE.getZero(EltSize->getType());
   const SCEV *Acc = Zero;
@@ -1009,6 +1236,7 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
     << "':";
 
   MySCEVRewriter Rewriter = MySCEVRewriter::create(*SE, *LI);
+  ExecutionDomain ED(*SE);
 
   for (Instruction &Inst : instructions(F)) {
     // Only analyze loads and stores.
@@ -1034,6 +1262,12 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
     O << "\n";
     O << "Inst:" << Inst << "\n";
     O << "AccessFunction: " << *AccessFn << "\n";
+
+    if (const SCEV *S = findMax(AccessFn, *SE, ED)) {
+      O << "Maximum value: " << *S << "\n";
+    } else {
+      O << "Cannot find the maximum value\n";
+    }
 
     // AccessFn = Rewriter.visit(AccessFn);
     // O << "Rewritten: " << *AccessFn << "\n";
