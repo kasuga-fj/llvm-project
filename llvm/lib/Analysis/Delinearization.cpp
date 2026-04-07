@@ -17,6 +17,7 @@
 #include "llvm/Analysis/ScalarEvolutionDivision.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -856,6 +857,18 @@ struct OverflowSafeSignedAPInt {
     return OverflowSafeSignedAPInt(-*Value);
   }
 
+  OverflowSafeSignedAPInt operator/(const OverflowSafeSignedAPInt &RHS) const {
+    if (!Value || !RHS.Value)
+      return OverflowSafeSignedAPInt();
+    if (RHS.Value->isZero())
+      return OverflowSafeSignedAPInt();
+    bool Overflow = false;
+    APInt Res = Value->sdiv_ov(*RHS.Value, Overflow);
+    if (Overflow)
+      return OverflowSafeSignedAPInt();
+    return OverflowSafeSignedAPInt(Res);
+  }
+
   operator bool() const { return Value.has_value(); }
 
   bool operator!() const { return !Value.has_value(); }
@@ -931,7 +944,7 @@ const SCEV *findMax(const SCEV *S, ScalarEvolution &SE, ExecutionDomain &ED) {
   if (!AR)
     return S;
 
-  if (!AR->isAffine() || !AR->hasNoSignedWrap())
+  if (!AR->isAffine() /* || !AR->hasNoSignedWrap()*/)
     return nullptr;
 
   const SCEV *Rec = findMax(AR->getStart(), SE, ED);
@@ -939,7 +952,7 @@ const SCEV *findMax(const SCEV *S, ScalarEvolution &SE, ExecutionDomain &ED) {
     return nullptr;
 
   const SCEV *Step = AR->getStepRecurrence(SE);
-  if (ED.isKnownNonNegative(Step)) {
+  if (ED.isKnownNonNegative(Step) || true) {
     const SCEV *BTC = SE.getBackedgeTakenCount(AR->getLoop());
     return dyn_cast<SCEVAddRecExpr>(
                SE.getAddRecExpr(Rec, Step, AR->getLoop(), AR->getNoWrapFlags()))
@@ -1199,6 +1212,93 @@ private:
   }
 };
 
+struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
+  InequalitySimpliler(CmpPredicate Pred, const SCEV *LHS, const APInt &RHS,
+                      ScalarEvolution &SE)
+      : Pred(Pred), LHS(LHS), RHS(RHS), SE(SE) {}
+
+  static std::tuple<CmpPredicate, const SCEV *, OverflowSafeSignedAPInt>
+  simplify(CmpPredicate Pred, const SCEV *LHS, const APInt &RHS,
+           ScalarEvolution &SE) {
+    InequalitySimpliler Simplifier(Pred, LHS, RHS, SE);
+    Simplifier.visit(LHS);
+    return {Simplifier.Pred, Simplifier.LHS, Simplifier.RHS};
+  }
+
+  void visitAddExpr(const SCEVAddExpr *S) {
+    // if (!S->hasNoSignedWrap())
+    //   return;
+
+    SmallVector<SCEVUse, 4> NewOps;
+    bool Update = false;
+    for (const SCEV *Op : S->operands()) {
+      if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
+        Update = true;
+        RHS = RHS - OverflowSafeSignedAPInt(C->getAPInt());
+      } else {
+        NewOps.push_back(Op);
+      }
+    }
+
+    if (!Update)
+      return;
+    if (NewOps.size() == 1) {
+      LHS = NewOps[0];
+      visit(LHS);
+    } else {
+      LHS = SE.getAddExpr(NewOps, S->getNoWrapFlags(), 0);
+    }
+  }
+
+  void visitMulExpr(const SCEVMulExpr *S) {
+    // if (!S->hasNoSignedWrap())
+    //   return;
+
+    SmallVector<SCEVUse, 4> NewOps;
+    bool Update = false;
+    for (const SCEV *Op : S->operands()) {
+      if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
+        Update = true;
+        // TODO: Sign?
+        RHS = RHS / OverflowSafeSignedAPInt(C->getAPInt());
+      } else {
+        NewOps.push_back(Op);
+      }
+    }
+
+    if (!Update)
+      return;
+    if (NewOps.size() == 1) {
+      LHS = NewOps[0];
+      visit(LHS);
+    } else {
+      LHS = SE.getMulExpr(NewOps, S->getNoWrapFlags(), 0);
+    }
+  }
+
+  void visitConstant(const SCEVConstant *) {}
+  void visitVScale(const SCEVVScale *) {}
+  void visitSignExtendExpr(const SCEVSignExtendExpr *S) {}
+  void visitSMinExpr(const SCEVSMinExpr *S) {}
+  void visitSMaxExpr(const SCEVSMaxExpr *S) {}
+  void visitPtrToAddrExpr(const SCEVPtrToAddrExpr *) {}
+  void visitPtrToIntExpr(const SCEVPtrToIntExpr *) {}
+  void visitTruncateExpr(const SCEVTruncateExpr *) {}
+  void visitZeroExtendExpr(const SCEVZeroExtendExpr *) {}
+  void visitUDivExpr(const SCEVUDivExpr *) {}
+  void visitAddRecExpr(const SCEVAddRecExpr *) {}
+  void visitUMaxExpr(const SCEVUMaxExpr *) {}
+  void visitUMinExpr(const SCEVUMinExpr *) {}
+  void visitUnknown(const SCEVUnknown *) {}
+  void visitSequentialUMinExpr(const SCEVSequentialUMinExpr *) {}
+
+private:
+  CmpPredicate Pred;
+  const SCEV *LHS;
+  OverflowSafeSignedAPInt RHS;
+  ScalarEvolution &SE;
+};
+
 bool RelaxedStrides::validate(ScalarEvolution &SE, const SCEV *EltSize) const {
   const SCEV *Zero = SE.getZero(EltSize->getType());
   const SCEV *Acc = Zero;
@@ -1257,16 +1357,38 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
     // Do not delinearize if we cannot find the base pointer.
     if (!BasePointer)
       break;
+
     AccessFn = SE->getMinusSCEV(AccessFn, BasePointer);
 
     O << "\n";
     O << "Inst:" << Inst << "\n";
     O << "AccessFunction: " << *AccessFn << "\n";
 
-    if (const SCEV *S = findMax(AccessFn, *SE, ED)) {
-      O << "Maximum value: " << *S << "\n";
+    const SCEV *MaxValue = findMax(AccessFn, *SE, ED);
+    if (MaxValue) {
+      O << "Maximum value: " << *MaxValue << "\n";
     } else {
       O << "Cannot find the maximum value\n";
+    }
+
+    Value *Ptr = BasePointer->getValue();
+    const DataLayout &DL = F->getDataLayout();
+    bool CheckForNonNull, CheckForFreed;
+    uint64_t DerefBytes =
+        Ptr->getPointerDereferenceableBytes(DL, CheckForNonNull, CheckForFreed);
+    if (DerefBytes && !CheckForNonNull && !CheckForFreed && MaxValue) {
+      O << "Dereferenceable bytes: " << DerefBytes << "\n";
+      APInt RHS0(DL.getIndexSize(0) * 8, DerefBytes, false, false);
+      O << "RHS0: " << RHS0 << "\n";
+      auto [Pred, LHS, RHS] = InequalitySimpliler::simplify(
+          ICmpInst::ICMP_ULT, MaxValue, RHS0, *SE);
+      if (Pred == ICmpInst::ICMP_ULT)
+        O << "Simplified inequality: " << *LHS << " <u ";
+      if (RHS)
+        O << *RHS;
+      else
+        O << "unknown";
+      O << "\n";
     }
 
     // AccessFn = Rewriter.visit(AccessFn);
