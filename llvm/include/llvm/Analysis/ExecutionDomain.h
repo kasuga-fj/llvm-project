@@ -18,6 +18,9 @@ struct InequalityType {
   const SCEV *LHS;
   APInt RHS;
 
+  InequalityType(CmpPredicate Pred, const SCEV *LHS, APInt RHS)
+      : Pred(Pred), LHS(LHS), RHS(RHS) {}
+
   void print(raw_ostream &OS) const {
     OS << *LHS << " " << ICmpInst::getPredicateName(Pred) << " " << RHS;
   }
@@ -25,41 +28,58 @@ struct InequalityType {
 
 struct ExecutionContext {
   const SCEV *S;
-  SmallVector<InequalityType, 4> Contexts;
+  SmallVector<InequalityType, 4> Inequalities;
+
+  ExecutionContext(const SCEV *S)
+      : S(S), Inequalities(), CachedRange(std::nullopt) {}
 
 private:
-  uint64_t CachedAt = 0;
-  uint64_t UpdatedAt = 0;
   std::optional<ConstantRange> CachedRange;
-
-  void setCache(const ConstantRange &Range, uint64_t Version) {
-    CachedRange = Range;
-    UpdatedAt = Version;
-  }
-
-  void addContext(const InequalityType &Inequality, uint64_t Version) {
-    Contexts.push_back(Inequality);
-    UpdatedAt = Version;
-  }
 
   friend struct ExecutionDomain;
 };
 
 struct ExecutionDomain {
-  ExecutionDomain(ScalarEvolution &SE) : SE(SE), Version(1) {}
+  ExecutionDomain(ScalarEvolution &SE) : SE(SE) {}
 
   void addInequality(const InequalityType &Inequality);
 
-  uint64_t getVersion() const { return Version; }
+  bool hasContext(const SCEV *S) const { return Contexts.contains(S); }
+
+  std::optional<ConstantRange> hasCachedRange(const SCEV *S) const {
+    auto Ite = Contexts.find(S);
+    if (Ite == Contexts.end())
+      return std::nullopt;
+    return Ite->second->CachedRange;
+  }
 
   ConstantRange getRange(const SCEV *S);
 
+  bool isKnownNonNegative(const SCEV *S);
+
+  bool isKnownNonPositive(const SCEV *S);
+
+  std::optional<ArrayRef<InequalityType>> getInequalities(const SCEV *S) {
+    auto Ite = Contexts.find(S);
+    if (Ite == Contexts.end())
+      return std::nullopt;
+    return Ite->second->Inequalities;
+  }
+
+  ScalarEvolution &getSE() const { return SE; }
+
+  void print(raw_ostream &OS);
+
 private:
   ScalarEvolution &SE;
-  uint64_t Version = 0;
-
   DenseMap<const SCEV *, std::unique_ptr<ExecutionContext>> Contexts;
   DenseMap<const SCEV *, SetVector<const SCEV *>> Preds;
+  DenseMap<const SCEV *, SetVector<const SCEV *>> Succs;
+
+  void addDependencies(const SCEV *Entry);
+  void tryAddDependency(const SCEV *From, const SCEV *FromSub, const SCEV *To);
+  void updateCache(const SCEV *S);
+  void invalidateCache(const SCEV *S);
 };
 
 struct ExecutionDomainPrinterPass

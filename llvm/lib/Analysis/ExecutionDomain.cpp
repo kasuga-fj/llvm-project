@@ -140,16 +140,6 @@ raw_ostream &operator<<(raw_ostream &OS, const OverflowSafeSignedAPInt &V) {
   return OS;
 }
 
-struct InequalityType {
-  CmpPredicate Pred;
-  const SCEV *LHS;
-  OverflowSafeSignedAPInt RHS;
-
-  void print(raw_ostream &OS) const {
-    OS << *LHS << " " << ICmpInst::getPredicateName(Pred) << " " << RHS;
-  }
-};
-
 raw_ostream &operator<<(raw_ostream &OS, const InequalityType &I) {
   I.print(OS);
   return OS;
@@ -196,27 +186,29 @@ Inequalities collectInequalities(Function &F, ScalarEvolution &SE) {
 }
 
 struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
-  InequalitySimpliler(const InequalityType &I, ScalarEvolution &SE)
-      : Inequality(I), SE(SE) {}
+  InequalitySimpliler(const InequalityType &Inequality, ScalarEvolution &SE)
+      : SE(SE), Pred(Inequality.Pred), LHS(Inequality.LHS),
+        RHS(Inequality.RHS) {}
 
-  static InequalityType simplify(const InequalityType &Inequality,
-                                 ScalarEvolution &SE) {
+  static std::optional<InequalityType>
+  simplify(const InequalityType &Inequality, ScalarEvolution &SE) {
     InequalitySimpliler Simplifier(Inequality, SE);
     Simplifier.visit(Inequality.LHS);
-    return Simplifier.Inequality;
+    if (Simplifier.RHS)
+      return InequalityType{Simplifier.Pred, Simplifier.LHS, *Simplifier.RHS};
+    return std::nullopt;
   }
 
   void visitAddExpr(const SCEVAddExpr *S) {
-    if (!S->hasNoSignedWrap())
-      return;
+    // if (!S->hasNoSignedWrap())
+    //   return;
 
     SmallVector<SCEVUse, 4> NewOps;
     bool Update = false;
     for (const SCEV *Op : S->operands()) {
       if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
         Update = true;
-        Inequality.RHS =
-            Inequality.RHS - OverflowSafeSignedAPInt(C->getAPInt());
+        RHS = RHS - OverflowSafeSignedAPInt(C->getAPInt());
       } else {
         NewOps.push_back(Op);
       }
@@ -225,16 +217,16 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
     if (!Update)
       return;
     if (NewOps.size() == 1) {
-      Inequality.LHS = NewOps[0];
-      visit(Inequality.LHS);
+      LHS = NewOps[0];
+      visit(LHS);
     } else {
-      Inequality.LHS = SE.getAddExpr(NewOps, S->getNoWrapFlags(), 0);
+      LHS = SE.getAddExpr(NewOps, S->getNoWrapFlags(), 0);
     }
   }
 
   void visitMulExpr(const SCEVMulExpr *S) {
-    if (!S->hasNoSignedWrap())
-      return;
+    // if (!S->hasNoSignedWrap())
+    //   return;
 
     SmallVector<SCEVUse, 4> NewOps;
     bool Update = false;
@@ -242,8 +234,7 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
       if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
         Update = true;
         // TODO: Sign?
-        Inequality.RHS =
-            Inequality.RHS / OverflowSafeSignedAPInt(C->getAPInt());
+        RHS = RHS / OverflowSafeSignedAPInt(C->getAPInt());
       } else {
         NewOps.push_back(Op);
       }
@@ -252,10 +243,10 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
     if (!Update)
       return;
     if (NewOps.size() == 1) {
-      Inequality.LHS = NewOps[0];
-      visit(Inequality.LHS);
+      LHS = NewOps[0];
+      visit(LHS);
     } else {
-      Inequality.LHS = SE.getMulExpr(NewOps, S->getNoWrapFlags(), 0);
+      LHS = SE.getMulExpr(NewOps, S->getNoWrapFlags(), 0);
     }
   }
 
@@ -276,17 +267,30 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
   void visitSequentialUMinExpr(const SCEVSequentialUMinExpr *) {}
 
 private:
-  InequalityType Inequality;
   ScalarEvolution &SE;
+  CmpPredicate Pred;
+  const SCEV *LHS;
+  OverflowSafeSignedAPInt RHS;
 };
 
 struct ExecutionDomainInterpreter
     : public SCEVVisitor<ExecutionDomainInterpreter, ConstantRange> {
+  using Base = SCEVVisitor<ExecutionDomainInterpreter, ConstantRange>;
 
-  ExecutionDomainInterpreter(ExecutionDomain &ED) : ED(ED) {}
+  ExecutionDomainInterpreter(const SCEV *Orig, ExecutionDomain &ED)
+      : Orig(Orig), ED(ED) {}
 
   static ConstantRange evaluate(const SCEV *S, ExecutionDomain &ED) {
-    return ExecutionDomainInterpreter(ED).visit(S);
+    dbgs() << "Evaluating " << *S << "\n";
+    return ExecutionDomainInterpreter(S, ED).visit(S);
+  }
+
+  ConstantRange visit(const SCEV *S) {
+    if (const std::optional<ConstantRange> Cached = ED.hasCachedRange(S))
+      return *Cached;
+    if (S != Orig && ED.hasContext(S))
+      return ED.getRange(S);
+    return Base::visit(S);
   }
 
   ConstantRange visitConstant(const SCEVConstant *C) {
@@ -297,7 +301,6 @@ struct ExecutionDomainInterpreter
     ConstantRange Result(APInt::getZero(S->getType()->getIntegerBitWidth()));
     for (const SCEV *Op : S->operands())
       Result = Result.add(visit(Op));
-    ED.setRange(S, Result);
     return Result;
   }
 
@@ -306,14 +309,12 @@ struct ExecutionDomainInterpreter
         APInt(S->getType()->getIntegerBitWidth(), 1, true, false));
     for (const SCEV *Op : S->operands())
       Result = Result.smul_fast(visit(Op));
-    ED.setRange(S, Result);
     return Result;
   }
 
   ConstantRange visitSignExtendExpr(const SCEVSignExtendExpr *S) {
     ConstantRange Result =
         visit(S->getOperand()).signExtend(S->getType()->getIntegerBitWidth());
-    ED.setRange(S, Result);
     return Result;
   }
 
@@ -321,7 +322,6 @@ struct ExecutionDomainInterpreter
     ConstantRange Result = visit(S->getOperand(0));
     for (unsigned I = 1, E = S->getNumOperands(); I != E; ++I)
       Result = Result.smin(visit(S->getOperand(I)));
-    ED.setRange(S, Result);
     return Result;
   }
 
@@ -329,7 +329,6 @@ struct ExecutionDomainInterpreter
     ConstantRange Result = visit(S->getOperand(0));
     for (unsigned I = 1, E = S->getNumOperands(); I != E; ++I)
       Result = Result.smax(visit(S->getOperand(I)));
-    ED.setRange(S, Result);
     return Result;
   }
 
@@ -358,11 +357,11 @@ struct ExecutionDomainInterpreter
   }
 
 private:
+  const SCEV *Orig;
   ExecutionDomain &ED;
 
   ConstantRange unknownRange(const SCEV *S) {
-    IntegerType *Ty = cast<IntegerType>(S->getType());
-    return ConstantRange::getFull(Ty->getBitWidth());
+    return ED.getSE().getSignedRange(S);
   }
 };
 
@@ -396,59 +395,180 @@ static const SCEV *findMaxValue(const SCEV *S, ExecutionDomain &ED) {
   return findMaxValueAux(S, ED);
 }
 
-void ExecutionDomain::smin(const SCEV *S, const APInt &RHS) {
-  auto Ite = fetch(S);
-  Ite->second = Ite->second.intersectWith(
-      ConstantRange::makeExactICmpRegion(ICmpInst::ICMP_SLT, RHS));
+static SmallVector<InequalityType, 2>
+canonicalizeInequality(InequalityType Inequality, ScalarEvolution &SE) {
+  SmallVector<InequalityType, 2> Result;
+  switch (Inequality.Pred) {
+  case ICmpInst::ICMP_SLT:
+  case ICmpInst::ICMP_SLE:
+  case ICmpInst::ICMP_SGT:
+  case ICmpInst::ICMP_SGE:
+    Result.push_back(Inequality);
+    break;
+  case ICmpInst::ICMP_ULT:
+    // X <u C
+    // TODO?: When C = 0.
+    Inequality.Pred = ICmpInst::ICMP_ULE;
+    Inequality.RHS = Inequality.RHS - 1;
+    [[fallthrough]];
+  case ICmpInst::ICMP_ULE: {
+    APInt SignedMax = APInt::getSignedMaxValue(Inequality.RHS.getBitWidth());
+    if (SignedMax.ult(Inequality.RHS))
+      break;
+    Inequality.Pred = ICmpInst::ICMP_SLE;
+    Result.push_back(Inequality);
+    Result.push_back({ICmpInst::ICMP_SGE, Inequality.LHS,
+                      APInt::getZero(Inequality.RHS.getBitWidth())});
+    break;
+  }
+  default:
+    break;
+  }
+  for (InequalityType &I : Result) {
+    I = InequalitySimpliler::simplify(I, SE).value_or(I);
+    // dbgs() << "Canonicalized inequality: " << I << "\n";
+  }
+  return Result;
 }
 
-void ExecutionDomain::smax(const SCEV *S, const APInt &RHS) {
-  auto Ite = fetch(S);
-  Ite->second = Ite->second.intersectWith(
-      ConstantRange::makeExactICmpRegion(ICmpInst::ICMP_SGE, RHS));
+void ExecutionDomain::addInequality(const InequalityType &Inequality) {
+  SmallVector<InequalityType, 2> Canonicalized =
+      canonicalizeInequality(Inequality, SE);
+  for (const InequalityType &I : Canonicalized) {
+    if (!Contexts.contains(I.LHS)) {
+      Contexts[I.LHS] = std::make_unique<ExecutionContext>(I.LHS);
+      addDependencies(I.LHS);
+    }
+    Contexts[I.LHS]->Inequalities.push_back(I);
+    invalidateCache(I.LHS);
+  }
 }
 
-void ExecutionDomain::clamp(const APInt &Min, const SCEV *S, const APInt &Max) {
-  auto Ite = fetch(S);
-  Ite->second = Ite->second.intersectWith(ConstantRange(Min, Max + 1));
+void ExecutionDomain::addDependencies(const SCEV *Entry) {
+  for (const auto &[Other, Values] : Contexts) {
+    if (Other == Entry)
+      continue;
+    tryAddDependency(Entry, Other, Other);
+    tryAddDependency(Other, Entry, Entry);
+  }
+}
+
+void ExecutionDomain::tryAddDependency(const SCEV *From, const SCEV *To,
+                                       const SCEV *ToSub) {
+  if (From == ToSub) {
+    Preds[To].insert(From);
+    Succs[From].insert(To);
+    return;
+  }
+
+  if (isa<SCEVAddExpr, SCEVMulExpr, SCEVSMinExpr, SCEVSMaxExpr>(ToSub))
+    for (const SCEV *Op : ToSub->operands())
+      tryAddDependency(From, To, Op);
+}
+
+ConstantRange ExecutionDomain::getRange(const SCEV *S) {
+  updateCache(S);
+  return Contexts[S]->CachedRange.value();
 }
 
 bool ExecutionDomain::isKnownNonNegative(const SCEV *S) {
-  auto Ite = Ranges.find(S);
-  if (Ite != Ranges.end() && Ite->second.getSignedMin().isNonNegative())
+  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+  if (!Range.isFullSet() && !Range.isSignWrappedSet() &&
+      Range.getSignedMin().isNonNegative())
     return true;
   return SE.isKnownNonNegative(S);
 }
 
 bool ExecutionDomain::isKnownNonPositive(const SCEV *S) {
-  auto Ite = Ranges.find(S);
-  if (Ite != Ranges.end() && Ite->second.getSignedMin().isNonPositive())
+  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+  if (!Range.isFullSet() && !Range.isSignWrappedSet() &&
+      Range.getSignedMax().isNonPositive())
     return true;
   return SE.isKnownNonPositive(S);
 }
 
-void ExecutionDomain::setRange(const SCEV *S, const ConstantRange &Range) {
-  auto Ite = fetch(S);
-  Ite->second = Ite->second.intersectWith(Range);
+void ExecutionDomain::updateCache(const SCEV *S) {
+  auto Ite = Contexts.find(S);
+  assert(Ite != Contexts.end());
+  if (Ite->second->CachedRange.has_value())
+    return;
+  for (const SCEV *Pred : Preds[S]) {
+    updateCache(Pred);
+  }
+  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+  for (const InequalityType &Inequality : Ite->second->Inequalities) {
+    assert(Inequality.LHS == S);
+    switch (Inequality.Pred) {
+    case ICmpInst::ICMP_SLT:
+      Range = Range.smin(Inequality.RHS - 1);
+      break;
+    case ICmpInst::ICMP_SLE:
+      Range = Range.smin(Inequality.RHS);
+      break;
+    case ICmpInst::ICMP_SGT:
+      Range = Range.smax(Inequality.RHS + 1);
+      break;
+    case ICmpInst::ICMP_SGE:
+      Range = Range.smax(Inequality.RHS);
+      break;
+    default:
+      llvm_unreachable("Unexpected predicate");
+    }
+  }
+  Ite->second->CachedRange = Range;
+}
+
+void ExecutionDomain::invalidateCache(const SCEV *S) {
+  auto Ite = Contexts.find(S);
+  assert(Ite != Contexts.end());
+  if (!Ite->second->CachedRange.has_value())
+    return;
+  Contexts[S]->CachedRange = std::nullopt;
+  for (const SCEV *Succ : Succs[S])
+    invalidateCache(Succ);
+}
+
+void ExecutionDomain::print(raw_ostream &OS) {
+  for (const auto &[S, Context] : Contexts) {
+    OS << "Context for " << *S << ":\n";
+    for (const InequalityType &Inequality : Context->Inequalities) {
+      OS << "  ";
+      Inequality.print(OS);
+      OS << "\n";
+    }
+    OS << "  Range: ";
+    getRange(S).print(OS);
+    OS << "\n";
+  }
 }
 
 static void printExecutionDomain(raw_ostream &OS, Function &F,
-                                 ScalarEvolution &SE) {
+                                 ScalarEvolution &SE, LoopInfo &LI) {
   ExecutionDomain ED(SE);
-  Inequalities Inequalities = collectInequalities(F, SE);
-  for (const auto &Inequality : Inequalities) {
-    OS << "Adding inequality: " << Inequality << "\n";
-    const SCEV *MaxValue = findMaxValue(Inequality.LHS, ED);
-    if (!MaxValue)
+
+  for (const Loop *L : LI) {
+    if (!SE.hasLoopInvariantBackedgeTakenCount(L))
       continue;
-    OS << "Max value: " << *MaxValue << "\n";
-    InequalityType ToSolve = Inequality;
-    ToSolve.LHS = MaxValue;
-    ToSolve = InequalitySimpliler::simplify(ToSolve, SE);
-    OS << "Solved: " << ToSolve << "\n";
-    // ED.setRange(Inequality.LHS,
-    // ConstantRange::makeExactICmpRegion(Inequality.Pred, *Inequality.RHS));
+    const SCEV *BTC = SE.getBackedgeTakenCount(L);
+    const SCEVConstant *Max =
+        dyn_cast<SCEVConstant>(SE.getConstantMaxBackedgeTakenCount(L));
+    InequalityType Inequality(ICmpInst::ICMP_ULE, BTC, Max->getAPInt());
+    ED.addInequality(Inequality);
   }
+
+  auto Inequalities = collectInequalities(F, SE);
+  for (InequalityType &Inequality : Inequalities) {
+    const SCEV *Max = findMaxValue(Inequality.LHS, ED);
+    if (Max) {
+      dbgs() << "Found max value for " << *Inequality.LHS << ": " << *Max
+             << "\n";
+      Inequality.LHS = Max;
+    } else {
+      dbgs() << "Could not find max value for " << *Inequality.LHS << "\n";
+    }
+    ED.addInequality(Inequality);
+  }
+  ED.print(OS);
 }
 
 ExecutionDomainPrinterPass::ExecutionDomainPrinterPass(raw_ostream &OS)
@@ -456,6 +576,7 @@ ExecutionDomainPrinterPass::ExecutionDomainPrinterPass(raw_ostream &OS)
 
 PreservedAnalyses ExecutionDomainPrinterPass::run(Function &F,
                                                   FunctionAnalysisManager &AM) {
-  printExecutionDomain(OS, F, AM.getResult<ScalarEvolutionAnalysis>(F));
+  printExecutionDomain(OS, F, AM.getResult<ScalarEvolutionAnalysis>(F),
+                       AM.getResult<LoopAnalysis>(F));
   return PreservedAnalyses::all();
 }
