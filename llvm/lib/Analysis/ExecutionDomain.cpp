@@ -280,6 +280,92 @@ private:
   ScalarEvolution &SE;
 };
 
+struct ExecutionDomainInterpreter
+    : public SCEVVisitor<ExecutionDomainInterpreter, ConstantRange> {
+
+  ExecutionDomainInterpreter(ExecutionDomain &ED) : ED(ED) {}
+
+  static ConstantRange evaluate(const SCEV *S, ExecutionDomain &ED) {
+    return ExecutionDomainInterpreter(ED).visit(S);
+  }
+
+  ConstantRange visitConstant(const SCEVConstant *C) {
+    return ConstantRange(C->getAPInt());
+  }
+
+  ConstantRange visitAddExpr(const SCEVAddExpr *S) {
+    ConstantRange Result(APInt::getZero(S->getType()->getIntegerBitWidth()));
+    for (const SCEV *Op : S->operands())
+      Result = Result.add(visit(Op));
+    ED.setRange(S, Result);
+    return Result;
+  }
+
+  ConstantRange visitMulExpr(const SCEVMulExpr *S) {
+    ConstantRange Result(
+        APInt(S->getType()->getIntegerBitWidth(), 1, true, false));
+    for (const SCEV *Op : S->operands())
+      Result = Result.smul_fast(visit(Op));
+    ED.setRange(S, Result);
+    return Result;
+  }
+
+  ConstantRange visitSignExtendExpr(const SCEVSignExtendExpr *S) {
+    ConstantRange Result =
+        visit(S->getOperand()).signExtend(S->getType()->getIntegerBitWidth());
+    ED.setRange(S, Result);
+    return Result;
+  }
+
+  ConstantRange visitSMinExpr(const SCEVSMinExpr *S) {
+    ConstantRange Result = visit(S->getOperand(0));
+    for (unsigned I = 1, E = S->getNumOperands(); I != E; ++I)
+      Result = Result.smin(visit(S->getOperand(I)));
+    ED.setRange(S, Result);
+    return Result;
+  }
+
+  ConstantRange visitSMaxExpr(const SCEVSMaxExpr *S) {
+    ConstantRange Result = visit(S->getOperand(0));
+    for (unsigned I = 1, E = S->getNumOperands(); I != E; ++I)
+      Result = Result.smax(visit(S->getOperand(I)));
+    ED.setRange(S, Result);
+    return Result;
+  }
+
+  ConstantRange visitVScale(const SCEVVScale *S) { return unknownRange(S); }
+  ConstantRange visitPtrToAddrExpr(const SCEVPtrToAddrExpr *S) {
+    return unknownRange(S);
+  }
+  ConstantRange visitPtrToIntExpr(const SCEVPtrToIntExpr *S) {
+    return unknownRange(S);
+  }
+  ConstantRange visitTruncateExpr(const SCEVTruncateExpr *S) {
+    return unknownRange(S);
+  }
+  ConstantRange visitZeroExtendExpr(const SCEVZeroExtendExpr *S) {
+    return unknownRange(S);
+  }
+  ConstantRange visitUDivExpr(const SCEVUDivExpr *S) { return unknownRange(S); }
+  ConstantRange visitAddRecExpr(const SCEVAddRecExpr *S) {
+    return unknownRange(S);
+  }
+  ConstantRange visitUMaxExpr(const SCEVUMaxExpr *S) { return unknownRange(S); }
+  ConstantRange visitUMinExpr(const SCEVUMinExpr *S) { return unknownRange(S); }
+  ConstantRange visitUnknown(const SCEVUnknown *S) { return unknownRange(S); }
+  ConstantRange visitSequentialUMinExpr(const SCEVSequentialUMinExpr *S) {
+    return unknownRange(S);
+  }
+
+private:
+  ExecutionDomain &ED;
+
+  ConstantRange unknownRange(const SCEV *S) {
+    IntegerType *Ty = cast<IntegerType>(S->getType());
+    return ConstantRange::getFull(Ty->getBitWidth());
+  }
+};
+
 } // anonymous namespace
 
 static const SCEV *findMaxValueAux(const SCEV *S, ExecutionDomain &ED) {
