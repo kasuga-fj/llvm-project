@@ -39,6 +39,7 @@
 #include "llvm/Analysis/DomPrinter.h"
 #include "llvm/Analysis/DominanceFrontier.h"
 #include "llvm/Analysis/EphemeralValuesCache.h"
+#include "llvm/Analysis/ExecutionDomain.h"
 #include "llvm/Analysis/FunctionPropertiesAnalysis.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/HashRecognize.h"
