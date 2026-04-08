@@ -277,20 +277,16 @@ struct ExecutionDomainInterpreter
     : public SCEVVisitor<ExecutionDomainInterpreter, ConstantRange> {
   using Base = SCEVVisitor<ExecutionDomainInterpreter, ConstantRange>;
 
-  ExecutionDomainInterpreter(const SCEV *Orig, ExecutionDomain &ED)
-      : Orig(Orig), ED(ED) {}
+  ExecutionDomainInterpreter(ExecutionDomain &ED) : ED(ED) {}
 
   static ConstantRange evaluate(const SCEV *S, ExecutionDomain &ED) {
     dbgs() << "Evaluating " << *S << "\n";
-    return ExecutionDomainInterpreter(S, ED).visit(S);
+    return ExecutionDomainInterpreter(ED).visit(S);
   }
 
   ConstantRange visit(const SCEV *S) {
-    if (const std::optional<ConstantRange> Cached = ED.hasCachedRange(S))
-      return *Cached;
-    if (S != Orig && ED.hasContext(S))
-      return ED.getRange(S);
-    return Base::visit(S);
+    ConstantRange Res = Base::visit(S);
+    return ED.withContext(S, Res);
   }
 
   ConstantRange visitConstant(const SCEVConstant *C) {
@@ -357,7 +353,6 @@ struct ExecutionDomainInterpreter
   }
 
 private:
-  const SCEV *Orig;
   ExecutionDomain &ED;
 
   ConstantRange unknownRange(const SCEV *S) {
@@ -386,6 +381,7 @@ static const SCEV *findMaxValueAux(const SCEV *S, ExecutionDomain &ED) {
     return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
   if (ED.isKnownNonPositive(Step))
     return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
+  dbgs() << "Could not determine the sign of the step: " << *Step << "\n";
   return nullptr;
 }
 
@@ -437,65 +433,15 @@ void ExecutionDomain::addInequality(const InequalityType &Inequality) {
   for (const InequalityType &I : Canonicalized) {
     if (!Contexts.contains(I.LHS)) {
       Contexts[I.LHS] = std::make_unique<ExecutionContext>(I.LHS);
-      addDependencies(I.LHS);
     }
     Contexts[I.LHS]->Inequalities.push_back(I);
-    invalidateCache(I.LHS);
   }
 }
 
-void ExecutionDomain::addDependencies(const SCEV *Entry) {
-  for (const auto &[Other, Values] : Contexts) {
-    if (Other == Entry)
-      continue;
-    tryAddDependency(Entry, Other, Other);
-    tryAddDependency(Other, Entry, Entry);
-  }
-}
-
-void ExecutionDomain::tryAddDependency(const SCEV *From, const SCEV *To,
-                                       const SCEV *ToSub) {
-  if (From == ToSub) {
-    Preds[To].insert(From);
-    Succs[From].insert(To);
-    return;
-  }
-
-  if (isa<SCEVAddExpr, SCEVMulExpr, SCEVSMinExpr, SCEVSMaxExpr>(ToSub))
-    for (const SCEV *Op : ToSub->operands())
-      tryAddDependency(From, To, Op);
-}
-
-ConstantRange ExecutionDomain::getRange(const SCEV *S) {
-  updateCache(S);
-  return Contexts[S]->CachedRange.value();
-}
-
-bool ExecutionDomain::isKnownNonNegative(const SCEV *S) {
-  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
-  if (!Range.isFullSet() && !Range.isSignWrappedSet() &&
-      Range.getSignedMin().isNonNegative())
-    return true;
-  return SE.isKnownNonNegative(S);
-}
-
-bool ExecutionDomain::isKnownNonPositive(const SCEV *S) {
-  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
-  if (!Range.isFullSet() && !Range.isSignWrappedSet() &&
-      Range.getSignedMax().isNonPositive())
-    return true;
-  return SE.isKnownNonPositive(S);
-}
-
-void ExecutionDomain::updateCache(const SCEV *S) {
+ConstantRange ExecutionDomain::withContext(const SCEV *S, ConstantRange Range) {
   auto Ite = Contexts.find(S);
-  assert(Ite != Contexts.end());
-  if (Ite->second->CachedRange.has_value())
-    return;
-  for (const SCEV *Pred : Preds[S]) {
-    updateCache(Pred);
-  }
-  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+  if (Ite == Contexts.end())
+    return Range;
   for (const InequalityType &Inequality : Ite->second->Inequalities) {
     assert(Inequality.LHS == S);
     switch (Inequality.Pred) {
@@ -515,17 +461,23 @@ void ExecutionDomain::updateCache(const SCEV *S) {
       llvm_unreachable("Unexpected predicate");
     }
   }
-  Ite->second->CachedRange = Range;
+  return Range;
 }
 
-void ExecutionDomain::invalidateCache(const SCEV *S) {
-  auto Ite = Contexts.find(S);
-  assert(Ite != Contexts.end());
-  if (!Ite->second->CachedRange.has_value())
-    return;
-  Contexts[S]->CachedRange = std::nullopt;
-  for (const SCEV *Succ : Succs[S])
-    invalidateCache(Succ);
+bool ExecutionDomain::isKnownNonNegative(const SCEV *S) {
+  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+  if (!Range.isFullSet() && !Range.isSignWrappedSet() &&
+      Range.getSignedMin().isNonNegative())
+    return true;
+  return SE.isKnownNonNegative(S);
+}
+
+bool ExecutionDomain::isKnownNonPositive(const SCEV *S) {
+  ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+  if (!Range.isFullSet() && !Range.isSignWrappedSet() &&
+      Range.getSignedMax().isNonPositive())
+    return true;
+  return SE.isKnownNonPositive(S);
 }
 
 void ExecutionDomain::print(raw_ostream &OS) {
@@ -536,25 +488,32 @@ void ExecutionDomain::print(raw_ostream &OS) {
       Inequality.print(OS);
       OS << "\n";
     }
-    OS << "  Range: ";
-    getRange(S).print(OS);
-    OS << "\n";
+    ConstantRange R = ExecutionDomainInterpreter::evaluate(S, *this);
+    OS << "  Range: " << R << "\n";
   }
 }
 
-static void printExecutionDomain(raw_ostream &OS, Function &F,
-                                 ScalarEvolution &SE, LoopInfo &LI) {
-  ExecutionDomain ED(SE);
-
-  for (const Loop *L : LI) {
-    if (!SE.hasLoopInvariantBackedgeTakenCount(L))
-      continue;
+static void traverseLoop(const Loop *L, ExecutionDomain &ED) {
+  ScalarEvolution &SE = ED.getSE();
+  if (SE.hasLoopInvariantBackedgeTakenCount(L)) {
     const SCEV *BTC = SE.getBackedgeTakenCount(L);
     const SCEVConstant *Max =
         dyn_cast<SCEVConstant>(SE.getConstantMaxBackedgeTakenCount(L));
     InequalityType Inequality(ICmpInst::ICMP_ULE, BTC, Max->getAPInt());
     ED.addInequality(Inequality);
   }
+  for (const Loop *Sub : *L)
+    traverseLoop(Sub, ED);
+}
+
+static void printExecutionDomain(raw_ostream &OS, Function &F,
+                                 ScalarEvolution &SE, LoopInfo &LI) {
+  ExecutionDomain ED(SE);
+
+  for (const Loop *L : LI)
+    traverseLoop(L, ED);
+
+  ED.print(OS);
 
   auto Inequalities = collectInequalities(F, SE);
   for (InequalityType &Inequality : Inequalities) {

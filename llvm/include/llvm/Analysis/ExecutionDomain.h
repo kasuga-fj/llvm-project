@@ -30,13 +30,7 @@ struct ExecutionContext {
   const SCEV *S;
   SmallVector<InequalityType, 4> Inequalities;
 
-  ExecutionContext(const SCEV *S)
-      : S(S), Inequalities(), CachedRange(std::nullopt) {}
-
-private:
-  std::optional<ConstantRange> CachedRange;
-
-  friend struct ExecutionDomain;
+  ExecutionContext(const SCEV *S) : S(S), Inequalities() {}
 };
 
 struct ExecutionDomain {
@@ -45,15 +39,6 @@ struct ExecutionDomain {
   void addInequality(const InequalityType &Inequality);
 
   bool hasContext(const SCEV *S) const { return Contexts.contains(S); }
-
-  std::optional<ConstantRange> hasCachedRange(const SCEV *S) const {
-    auto Ite = Contexts.find(S);
-    if (Ite == Contexts.end())
-      return std::nullopt;
-    return Ite->second->CachedRange;
-  }
-
-  ConstantRange getRange(const SCEV *S);
 
   bool isKnownNonNegative(const SCEV *S);
 
@@ -68,18 +53,16 @@ struct ExecutionDomain {
 
   ScalarEvolution &getSE() const { return SE; }
 
+  ConstantRange withContext(const SCEV *S, ConstantRange Range);
+
   void print(raw_ostream &OS);
 
 private:
   ScalarEvolution &SE;
   DenseMap<const SCEV *, std::unique_ptr<ExecutionContext>> Contexts;
-  DenseMap<const SCEV *, SetVector<const SCEV *>> Preds;
-  DenseMap<const SCEV *, SetVector<const SCEV *>> Succs;
 
   void addDependencies(const SCEV *Entry);
   void tryAddDependency(const SCEV *From, const SCEV *FromSub, const SCEV *To);
-  void updateCache(const SCEV *S);
-  void invalidateCache(const SCEV *S);
 };
 
 struct ExecutionDomainPrinterPass
