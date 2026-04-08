@@ -21,8 +21,7 @@ static SmallPtrSet<const SCEV *, 4> computeComplexity(const SCEV *S) {
         Result.insert(S);
         return false;
       }
-
-      return 1 < S->operands().size();
+      return true;
     }
 
     bool isDone() const { return false; }
@@ -35,71 +34,100 @@ static SmallPtrSet<const SCEV *, 4> computeComplexity(const SCEV *S) {
 
 namespace {
 
-struct OverflowSafeSignedAPInt {
+class OverflowSafeSignedAPInt {
+  using Self = OverflowSafeSignedAPInt;
+
+  /// Underlying value. std::nullopt means "unknown". An arithmetic operation on
+  /// "unknown" always produces "unknown".
+  std::optional<APInt> Value;
+
+  OverflowSafeSignedAPInt fromInt(uint64_t V) const {
+    assert(Value && "Value is not available.");
+    return OverflowSafeSignedAPInt(
+        APInt(Value->getBitWidth(), V, /*isSigned=*/true));
+  }
+
+public:
   OverflowSafeSignedAPInt() : Value(std::nullopt) {}
   OverflowSafeSignedAPInt(const APInt &V) : Value(V) {}
   OverflowSafeSignedAPInt(const std::optional<APInt> &V) : Value(V) {}
 
-  OverflowSafeSignedAPInt operator+(const OverflowSafeSignedAPInt &RHS) const {
+  Self &operator+=(const Self &RHS) {
     if (!Value || !RHS.Value)
-      return OverflowSafeSignedAPInt();
+      return *this = Self();
     bool Overflow;
     APInt Result = Value->sadd_ov(*RHS.Value, Overflow);
     if (Overflow)
-      return OverflowSafeSignedAPInt();
-    return OverflowSafeSignedAPInt(Result);
+      return *this = Self();
+    Value = Result;
+    return *this;
   }
 
-  OverflowSafeSignedAPInt operator+(int RHS) const {
-    if (!Value)
-      return OverflowSafeSignedAPInt();
-    return *this + fromInt(RHS);
+  Self operator+(const Self &RHS) const {
+    Self LHS = *this;
+    LHS += RHS;
+    return LHS;
   }
 
-  OverflowSafeSignedAPInt operator-(const OverflowSafeSignedAPInt &RHS) const {
+  Self operator+(int RHS) const { return *this + fromInt(RHS); }
+
+  Self &operator+=(int RHS) { return *this += fromInt(RHS); }
+
+  Self &operator-=(const Self &RHS) {
     if (!Value || !RHS.Value)
-      return OverflowSafeSignedAPInt();
+      return *this = Self();
     bool Overflow;
     APInt Result = Value->ssub_ov(*RHS.Value, Overflow);
     if (Overflow)
-      return OverflowSafeSignedAPInt();
-    return OverflowSafeSignedAPInt(Result);
+      return *this = Self();
+    Value = Result;
+    return *this;
   }
 
-  OverflowSafeSignedAPInt operator-(int RHS) const {
-    if (!Value)
-      return OverflowSafeSignedAPInt();
-    return *this - fromInt(RHS);
+  Self operator-(const Self &RHS) const {
+    Self LHS = *this;
+    LHS -= RHS;
+    return LHS;
   }
 
-  OverflowSafeSignedAPInt operator*(const OverflowSafeSignedAPInt &RHS) const {
+  Self &operator-=(int RHS) { return *this -= fromInt(RHS); }
+
+  Self operator-(int RHS) const { return *this - fromInt(RHS); }
+
+  Self operator*(const Self &RHS) const {
     if (!Value || !RHS.Value)
-      return OverflowSafeSignedAPInt();
+      return Self();
     bool Overflow;
     APInt Result = Value->smul_ov(*RHS.Value, Overflow);
     if (Overflow)
-      return OverflowSafeSignedAPInt();
-    return OverflowSafeSignedAPInt(Result);
+      return Self();
+    return Self(Result);
   }
 
-  OverflowSafeSignedAPInt operator-() const {
+  Self operator-() const {
     if (!Value)
-      return OverflowSafeSignedAPInt();
+      return Self();
     if (Value->isMinSignedValue())
-      return OverflowSafeSignedAPInt();
-    return OverflowSafeSignedAPInt(-*Value);
+      return Self();
+    return Self(-*Value);
   }
 
-  OverflowSafeSignedAPInt operator/(const OverflowSafeSignedAPInt &RHS) const {
+  Self operator/(const Self &RHS) const {
     if (!Value || !RHS.Value)
-      return OverflowSafeSignedAPInt();
+      return Self();
     if (RHS.Value->isZero())
-      return OverflowSafeSignedAPInt();
+      return Self();
     bool Overflow = false;
     APInt Res = Value->sdiv_ov(*RHS.Value, Overflow);
     if (Overflow)
-      return OverflowSafeSignedAPInt();
-    return OverflowSafeSignedAPInt(Res);
+      return Self();
+    return Self(Res);
+  }
+
+  std::pair<Self, Self> sdivrem(const Self &RHS) const {
+    Self Q = (*this) / RHS;
+    Self R = *this - Q * RHS;
+    return std::make_pair(Q, R);
   }
 
   operator bool() const { return Value.has_value(); }
@@ -123,27 +151,11 @@ struct OverflowSafeSignedAPInt {
       OS << "unknown";
   }
 
-private:
-  /// Underlying value. std::nullopt means "unknown". An arithmetic operation on
-  /// "unknown" always produces "unknown".
-  std::optional<APInt> Value;
-
-  OverflowSafeSignedAPInt fromInt(uint64_t V) const {
-    assert(Value && "Value is not available.");
-    return OverflowSafeSignedAPInt(
-        APInt(Value->getBitWidth(), V, /*isSigned=*/true));
-  }
+  bool isPositive() const { return Value && Value->isStrictlyPositive(); }
+  bool isNonNegative() const { return Value && Value->isNonNegative(); }
+  bool isZero() const { return Value && Value->isZero(); }
+  bool isNonZero() const { return Value && !Value->isZero(); }
 };
-
-raw_ostream &operator<<(raw_ostream &OS, const OverflowSafeSignedAPInt &V) {
-  V.print(OS);
-  return OS;
-}
-
-raw_ostream &operator<<(raw_ostream &OS, const InequalityType &I) {
-  I.print(OS);
-  return OS;
-}
 
 using Inequalities = SmallVector<InequalityType, 4>;
 
@@ -174,104 +186,15 @@ Inequalities collectInequalities(Function &F, ScalarEvolution &SE) {
     }
   }
 
-  llvm::stable_sort(Worklist,
-                    [](const std::pair<InequalityType, unsigned> &LHS,
-                       const std::pair<InequalityType, unsigned> &RHS) {
-                      return LHS.second < RHS.second;
-                    });
+  stable_sort(Worklist, [](const std::pair<InequalityType, unsigned> &LHS,
+                           const std::pair<InequalityType, unsigned> &RHS) {
+    return LHS.second < RHS.second;
+  });
   Inequalities Result;
   for (const auto &KV : Worklist)
     Result.push_back(KV.first);
   return Result;
 }
-
-struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
-  InequalitySimpliler(const InequalityType &Inequality, ScalarEvolution &SE)
-      : SE(SE), Pred(Inequality.Pred), LHS(Inequality.LHS),
-        RHS(Inequality.RHS) {}
-
-  static std::optional<InequalityType>
-  simplify(const InequalityType &Inequality, ScalarEvolution &SE) {
-    InequalitySimpliler Simplifier(Inequality, SE);
-    Simplifier.visit(Inequality.LHS);
-    if (Simplifier.RHS)
-      return InequalityType{Simplifier.Pred, Simplifier.LHS, *Simplifier.RHS};
-    return std::nullopt;
-  }
-
-  void visitAddExpr(const SCEVAddExpr *S) {
-    // if (!S->hasNoSignedWrap())
-    //   return;
-
-    SmallVector<SCEVUse, 4> NewOps;
-    bool Update = false;
-    for (const SCEV *Op : S->operands()) {
-      if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
-        Update = true;
-        RHS = RHS - OverflowSafeSignedAPInt(C->getAPInt());
-      } else {
-        NewOps.push_back(Op);
-      }
-    }
-
-    if (!Update)
-      return;
-    if (NewOps.size() == 1) {
-      LHS = NewOps[0];
-      visit(LHS);
-    } else {
-      LHS = SE.getAddExpr(NewOps, S->getNoWrapFlags(), 0);
-    }
-  }
-
-  void visitMulExpr(const SCEVMulExpr *S) {
-    // if (!S->hasNoSignedWrap())
-    //   return;
-
-    SmallVector<SCEVUse, 4> NewOps;
-    bool Update = false;
-    for (const SCEV *Op : S->operands()) {
-      if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
-        Update = true;
-        // TODO: Sign?
-        RHS = RHS / OverflowSafeSignedAPInt(C->getAPInt());
-      } else {
-        NewOps.push_back(Op);
-      }
-    }
-
-    if (!Update)
-      return;
-    if (NewOps.size() == 1) {
-      LHS = NewOps[0];
-      visit(LHS);
-    } else {
-      LHS = SE.getMulExpr(NewOps, S->getNoWrapFlags(), 0);
-    }
-  }
-
-  void visitConstant(const SCEVConstant *) {}
-  void visitVScale(const SCEVVScale *) {}
-  void visitSignExtendExpr(const SCEVSignExtendExpr *S) {}
-  void visitSMinExpr(const SCEVSMinExpr *S) {}
-  void visitSMaxExpr(const SCEVSMaxExpr *S) {}
-  void visitPtrToAddrExpr(const SCEVPtrToAddrExpr *) {}
-  void visitPtrToIntExpr(const SCEVPtrToIntExpr *) {}
-  void visitTruncateExpr(const SCEVTruncateExpr *) {}
-  void visitZeroExtendExpr(const SCEVZeroExtendExpr *) {}
-  void visitUDivExpr(const SCEVUDivExpr *) {}
-  void visitAddRecExpr(const SCEVAddRecExpr *) {}
-  void visitUMaxExpr(const SCEVUMaxExpr *) {}
-  void visitUMinExpr(const SCEVUMinExpr *) {}
-  void visitUnknown(const SCEVUnknown *) {}
-  void visitSequentialUMinExpr(const SCEVSequentialUMinExpr *) {}
-
-private:
-  ScalarEvolution &SE;
-  CmpPredicate Pred;
-  const SCEV *LHS;
-  OverflowSafeSignedAPInt RHS;
-};
 
 struct ExecutionDomainInterpreter
     : public SCEVVisitor<ExecutionDomainInterpreter, ConstantRange> {
@@ -280,7 +203,6 @@ struct ExecutionDomainInterpreter
   ExecutionDomainInterpreter(ExecutionDomain &ED) : ED(ED) {}
 
   static ConstantRange evaluate(const SCEV *S, ExecutionDomain &ED) {
-    dbgs() << "Evaluating " << *S << "\n";
     return ExecutionDomainInterpreter(ED).visit(S);
   }
 
@@ -360,6 +282,161 @@ private:
   }
 };
 
+struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
+  using Base = SCEVVisitor<InequalitySimpliler, void>;
+
+  InequalitySimpliler(const InequalityType &Inequality, ExecutionDomain &ED)
+      : ED(ED), Pred(Inequality.Pred), LHS(Inequality.LHS),
+        RHS(Inequality.RHS) {}
+
+  static std::optional<InequalityType>
+  simplify(const InequalityType &Inequality, ExecutionDomain &ED) {
+    InequalitySimpliler Simplifier(Inequality, ED);
+    Simplifier.visit(Inequality.LHS);
+    if (Simplifier.RHS)
+      return InequalityType(Simplifier.Pred, Simplifier.LHS, *Simplifier.RHS);
+    return std::nullopt;
+  }
+
+  void visit(const SCEV *S) {
+    if (!RHS) {
+      LLVM_DEBUG(dbgs() << "  Failed to simplify...\n");
+      return;
+    }
+    InequalityType Cur(Pred, S, *RHS);
+    Base::visit(S);
+  }
+
+  void visitAddExpr(const SCEVAddExpr *S) {
+    // https://alive2.llvm.org/ce/z/rEsNYQ
+    // (X0 + ... + Xn) + C0 cmp C1 -->  X0 + ... + Xn cmp C1 - C0
+    SmallVector<SCEVUse, 1> NewOps;
+    OverflowSafeSignedAPInt C;
+    for (const SCEV *Op : S->operands()) {
+      if (const SCEVConstant *COp = dyn_cast<SCEVConstant>(Op)) {
+        C = COp->getAPInt();
+      } else {
+        NewOps.push_back(Op);
+      }
+    }
+
+    if (!C)
+      return;
+
+    bool NoWrap = [&] {
+      if (S->hasNoSignedWrap())
+        return true;
+      ConstantRange Range =
+          ConstantRange(APInt::getZero(S->getType()->getIntegerBitWidth()));
+      for (const SCEV *Op : NewOps) {
+        ConstantRange Other = ExecutionDomainInterpreter::evaluate(Op, ED);
+        if (Range.signedAddMayOverflow(Other) !=
+            ConstantRange::OverflowResult::NeverOverflows)
+          return false;
+        Range = Range.add(ExecutionDomainInterpreter::evaluate(Op, ED));
+      }
+      return true;
+    }();
+
+    if (!NoWrap)
+      return;
+
+    RHS -= C;
+    if (NewOps.size() == 1) {
+      LHS = NewOps[0];
+      visit(LHS);
+    } else {
+      LHS = ED.getSE().getAddExpr(NewOps, S->getNoWrapFlags(), 0);
+    }
+  }
+
+  void visitMulExpr(const SCEVMulExpr *S) {
+    SmallVector<SCEVUse, 1> NewOps;
+    OverflowSafeSignedAPInt C;
+    for (const SCEV *Op : S->operands()) {
+      if (const SCEVConstant *COp = dyn_cast<SCEVConstant>(Op)) {
+        C = COp->getAPInt();
+      } else {
+        NewOps.push_back(Op);
+      }
+    }
+
+    if (!C)
+      return;
+    bool NoWrap = [&] {
+      if (S->hasNoSignedWrap())
+        return true;
+      ConstantRange Range = ConstantRange(
+          APInt(S->getType()->getIntegerBitWidth(), 1, true, false));
+      for (const SCEV *Op : NewOps) {
+        Range = Range.smul_fast(ExecutionDomainInterpreter::evaluate(Op, ED));
+        if (Range.isFullSet())
+          return false;
+      }
+      return true;
+    }();
+
+    if (!NoWrap)
+      return;
+
+    if (!RHS.isPositive())
+      return;
+    auto [Q, R] = RHS.sdivrem(C);
+    bool Update = false;
+    if (R.isZero()) {
+      // https://alive2.llvm.org/ce/z/fPnXoS
+      RHS = Q;
+      Update = true;
+    } else if (C.isPositive()) {
+      assert(Pred == ICmpInst::ICMP_SLT || Pred == ICmpInst::ICMP_SGT);
+      if (Pred == ICmpInst::ICMP_SLT) {
+        if (C.isPositive() && RHS.isNonNegative() && Q.isNonZero()) {
+          // https://alive2.llvm.org/ce/z/JyeHkD
+          RHS = Q + 1;
+          Update = true;
+        }
+      } else {
+        // https://alive2.llvm.org/ce/z/osWHWw
+        RHS = Q;
+        Update = true;
+      }
+    }
+
+    if (!Update) {
+      RHS = OverflowSafeSignedAPInt();
+      return;
+    }
+    if (NewOps.size() == 1) {
+      LHS = NewOps[0];
+      visit(LHS);
+    } else {
+      LHS = ED.getSE().getMulExpr(NewOps, S->getNoWrapFlags(), 0);
+    }
+  }
+
+  void visitConstant(const SCEVConstant *) {}
+  void visitVScale(const SCEVVScale *) {}
+  void visitSignExtendExpr(const SCEVSignExtendExpr *S) {}
+  void visitSMinExpr(const SCEVSMinExpr *S) {}
+  void visitSMaxExpr(const SCEVSMaxExpr *S) {}
+  void visitPtrToAddrExpr(const SCEVPtrToAddrExpr *) {}
+  void visitPtrToIntExpr(const SCEVPtrToIntExpr *) {}
+  void visitTruncateExpr(const SCEVTruncateExpr *) {}
+  void visitZeroExtendExpr(const SCEVZeroExtendExpr *) {}
+  void visitUDivExpr(const SCEVUDivExpr *) {}
+  void visitAddRecExpr(const SCEVAddRecExpr *) {}
+  void visitUMaxExpr(const SCEVUMaxExpr *) {}
+  void visitUMinExpr(const SCEVUMinExpr *) {}
+  void visitUnknown(const SCEVUnknown *) {}
+  void visitSequentialUMinExpr(const SCEVSequentialUMinExpr *) {}
+
+private:
+  ExecutionDomain &ED;
+  CmpPredicate Pred;
+  const SCEV *LHS;
+  OverflowSafeSignedAPInt RHS;
+};
+
 } // anonymous namespace
 
 static const SCEV *findMaxValueAux(const SCEV *S, ExecutionDomain &ED) {
@@ -381,7 +458,6 @@ static const SCEV *findMaxValueAux(const SCEV *S, ExecutionDomain &ED) {
     return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
   if (ED.isKnownNonPositive(Step))
     return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
-  dbgs() << "Could not determine the sign of the step: " << *Step << "\n";
   return nullptr;
 }
 
@@ -392,49 +468,100 @@ static const SCEV *findMaxValue(const SCEV *S, ExecutionDomain &ED) {
 }
 
 static SmallVector<InequalityType, 2>
-canonicalizeInequality(InequalityType Inequality, ScalarEvolution &SE) {
+canonicalizeInequality(InequalityType Inequality, ExecutionDomain &ED) {
   SmallVector<InequalityType, 2> Result;
+  auto Push = [&Result](InequalityType I) {
+    switch (I.Pred) {
+    case ICmpInst::ICMP_SLE: {
+      OverflowSafeSignedAPInt Tmp(I.RHS);
+      Tmp += 1;
+      if (!Tmp)
+        break;
+      I.Pred = ICmpInst::ICMP_SLT;
+      I.RHS = *Tmp;
+      [[fallthrough]];
+    }
+    case ICmpInst::ICMP_SLT:
+      Result.push_back(I);
+      break;
+    case ICmpInst::ICMP_SGE: {
+      OverflowSafeSignedAPInt Tmp(I.RHS);
+      Tmp -= 1;
+      if (!Tmp)
+        break;
+      I.Pred = ICmpInst::ICMP_SGT;
+      I.RHS = *Tmp;
+      [[fallthrough]];
+    }
+    case ICmpInst::ICMP_SGT:
+      Result.push_back(I);
+      break;
+    default:
+      llvm_unreachable("Unexpected predicate");
+    }
+  };
+
   switch (Inequality.Pred) {
   case ICmpInst::ICMP_SLT:
   case ICmpInst::ICMP_SLE:
   case ICmpInst::ICMP_SGT:
   case ICmpInst::ICMP_SGE:
-    Result.push_back(Inequality);
+    Push(Inequality);
     break;
-  case ICmpInst::ICMP_ULT:
-    // X <u C
-    // TODO?: When C = 0.
+  case ICmpInst::ICMP_ULT: {
+    // https://alive2.llvm.org/ce/z/TworUD
+    // X <u C --> X <=u C - 1
+    if (Inequality.RHS.isZero())
+      break;
     Inequality.Pred = ICmpInst::ICMP_ULE;
-    Inequality.RHS = Inequality.RHS - 1;
+    OverflowSafeSignedAPInt Tmp(Inequality.RHS);
+    Tmp -= 1;
+    if (!Tmp)
+      break;
+    Inequality.RHS = *Tmp;
     [[fallthrough]];
+  }
   case ICmpInst::ICMP_ULE: {
+    // https://alive2.llvm.org/ce/z/ZaXVPV
+    // X <=u C --> 0 <=s X && X <=s C
     APInt SignedMax = APInt::getSignedMaxValue(Inequality.RHS.getBitWidth());
-    if (SignedMax.ult(Inequality.RHS))
+    if (!Inequality.RHS.ult(SignedMax))
       break;
     Inequality.Pred = ICmpInst::ICMP_SLE;
-    Result.push_back(Inequality);
-    Result.push_back({ICmpInst::ICMP_SGE, Inequality.LHS,
-                      APInt::getZero(Inequality.RHS.getBitWidth())});
+    Push(Inequality);
+    Push(InequalityType(ICmpInst::ICMP_SGE, Inequality.LHS,
+                        APInt::getZero(Inequality.RHS.getBitWidth())));
     break;
   }
   default:
     break;
   }
-  for (InequalityType &I : Result) {
-    I = InequalitySimpliler::simplify(I, SE).value_or(I);
-    // dbgs() << "Canonicalized inequality: " << I << "\n";
-  }
+  for (InequalityType &I : Result)
+    I = InequalitySimpliler::simplify(I, ED).value_or(I);
   return Result;
 }
 
 void ExecutionDomain::addInequality(const InequalityType &Inequality) {
   SmallVector<InequalityType, 2> Canonicalized =
-      canonicalizeInequality(Inequality, SE);
+      canonicalizeInequality(Inequality, *this);
   for (const InequalityType &I : Canonicalized) {
-    if (!Contexts.contains(I.LHS)) {
-      Contexts[I.LHS] = std::make_unique<ExecutionContext>(I.LHS);
+    auto &Inequalities = Contexts[I.LHS];
+    auto [Ite, Inserted] = Inequalities.try_emplace(I.Pred, I);
+    if (Inserted)
+      continue;
+    APInt &RHS = Ite->second.RHS;
+    switch (I.Pred) {
+    case ICmpInst::ICMP_SLT:
+    case ICmpInst::ICMP_SLE:
+      RHS = APIntOps::smin(RHS, I.RHS);
+      break;
+    case ICmpInst::ICMP_SGT:
+    case ICmpInst::ICMP_SGE:
+      RHS = APIntOps::smax(RHS, I.RHS);
+      break;
+    default:
+      llvm_unreachable("Unexpected predicate");
     }
-    Contexts[I.LHS]->Inequalities.push_back(I);
   }
 }
 
@@ -442,8 +569,9 @@ ConstantRange ExecutionDomain::withContext(const SCEV *S, ConstantRange Range) {
   auto Ite = Contexts.find(S);
   if (Ite == Contexts.end())
     return Range;
-  for (const InequalityType &Inequality : Ite->second->Inequalities) {
+  for (const auto &[Pred, Inequality] : Ite->second) {
     assert(Inequality.LHS == S);
+    assert(Inequality.Pred == Pred);
     switch (Inequality.Pred) {
     case ICmpInst::ICMP_SLT:
       Range = Range.smin(Inequality.RHS - 1);
@@ -481,15 +609,28 @@ bool ExecutionDomain::isKnownNonPositive(const SCEV *S) {
 }
 
 void ExecutionDomain::print(raw_ostream &OS) {
-  for (const auto &[S, Context] : Contexts) {
+  SmallVector<const SCEV *, 4> SortedSCEVs;
+  for (const auto &[S, Inequalities] : Contexts)
+    SortedSCEVs.push_back(S);
+  stable_sort(SortedSCEVs,
+              [](const SCEV *LHS, const SCEV *RHS) { return LHS < RHS; });
+
+  for (const SCEV *S : SortedSCEVs) {
     OS << "Context for " << *S << ":\n";
-    for (const InequalityType &Inequality : Context->Inequalities) {
-      OS << "  ";
-      Inequality.print(OS);
-      OS << "\n";
-    }
-    ConstantRange R = ExecutionDomainInterpreter::evaluate(S, *this);
-    OS << "  Range: " << R << "\n";
+    SmallVector<InequalityType, 4> SortedInequalities;
+    for (const auto &[Pred, Inequality] : Contexts[S])
+      SortedInequalities.push_back(Inequality);
+    stable_sort(SortedInequalities,
+                [](const InequalityType &LHS, const InequalityType &RHS) {
+                  return LHS.Pred < RHS.Pred;
+                });
+    for (const InequalityType &Inequality : SortedInequalities)
+      OS << "  " << Inequality << "\n";
+  }
+
+  for (const SCEV *S : SortedSCEVs) {
+    ConstantRange Range = ExecutionDomainInterpreter::evaluate(S, *this);
+    OS << "Range for " << *S << ": " << Range << "\n";
   }
 }
 
@@ -513,19 +654,13 @@ static void printExecutionDomain(raw_ostream &OS, Function &F,
   for (const Loop *L : LI)
     traverseLoop(L, ED);
 
-  ED.print(OS);
-
   auto Inequalities = collectInequalities(F, SE);
   for (InequalityType &Inequality : Inequalities) {
     const SCEV *Max = findMaxValue(Inequality.LHS, ED);
     if (Max) {
-      dbgs() << "Found max value for " << *Inequality.LHS << ": " << *Max
-             << "\n";
       Inequality.LHS = Max;
-    } else {
-      dbgs() << "Could not find max value for " << *Inequality.LHS << "\n";
+      ED.addInequality(Inequality);
     }
-    ED.addInequality(Inequality);
   }
   ED.print(OS);
 }

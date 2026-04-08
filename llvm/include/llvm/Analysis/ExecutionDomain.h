@@ -1,7 +1,6 @@
 #ifndef LLVM_ANALYSIS_EXECUTIONDOMAIN_H
 #define LLVM_ANALYSIS_EXECUTIONDOMAIN_H
 
-#include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/Delinearization.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
@@ -14,7 +13,7 @@
 namespace llvm {
 
 struct InequalityType {
-  CmpPredicate Pred;
+  ICmpInst::Predicate Pred;
   const SCEV *LHS;
   APInt RHS;
 
@@ -24,14 +23,17 @@ struct InequalityType {
   void print(raw_ostream &OS) const {
     OS << *LHS << " " << ICmpInst::getPredicateName(Pred) << " " << RHS;
   }
+
+  raw_ostream &operator<<(raw_ostream &OS) const {
+    print(OS);
+    return OS;
+  }
 };
 
-struct ExecutionContext {
-  const SCEV *S;
-  SmallVector<InequalityType, 4> Inequalities;
-
-  ExecutionContext(const SCEV *S) : S(S), Inequalities() {}
-};
+inline raw_ostream &operator<<(raw_ostream &OS, const InequalityType &I) {
+  I.print(OS);
+  return OS;
+}
 
 struct ExecutionDomain {
   ExecutionDomain(ScalarEvolution &SE) : SE(SE) {}
@@ -44,13 +46,6 @@ struct ExecutionDomain {
 
   bool isKnownNonPositive(const SCEV *S);
 
-  std::optional<ArrayRef<InequalityType>> getInequalities(const SCEV *S) {
-    auto Ite = Contexts.find(S);
-    if (Ite == Contexts.end())
-      return std::nullopt;
-    return Ite->second->Inequalities;
-  }
-
   ScalarEvolution &getSE() const { return SE; }
 
   ConstantRange withContext(const SCEV *S, ConstantRange Range);
@@ -59,10 +54,8 @@ struct ExecutionDomain {
 
 private:
   ScalarEvolution &SE;
-  DenseMap<const SCEV *, std::unique_ptr<ExecutionContext>> Contexts;
-
-  void addDependencies(const SCEV *Entry);
-  void tryAddDependency(const SCEV *From, const SCEV *FromSub, const SCEV *To);
+  DenseMap<const SCEV *, DenseMap<ICmpInst::Predicate, InequalityType>>
+      Contexts;
 };
 
 struct ExecutionDomainPrinterPass
