@@ -39,6 +39,7 @@ SUPPORTED_ANALYSES = {
     "Cost Model Analysis",
     "Dependence Analysis",
     "Delinearization",
+    "Execution Domain",
     "Loop Access Analysis",
     "Scalar Evolution Analysis",
     "Scalar Evolution Division",
