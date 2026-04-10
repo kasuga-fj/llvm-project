@@ -70,47 +70,6 @@
 
 define void @test(ptr noalias readonly captures(none) %0, ptr noalias readonly captures(none) %1, ptr noalias captures(none) %2, ptr noalias captures(none) %3, ptr noalias readonly captures(none) %4, ptr noalias readonly captures(none) %5, ptr noalias readonly captures(none) %6, ptr noalias readonly captures(none) %7, ptr noalias readonly captures(none) %8, ptr noalias readonly captures(none) %9) {
 ; CHECK-LABEL: 'test'
-; CHECK-NEXT:  Is safe to estimate max offset value for each pointer...
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %43 = getelementptr double, ptr @GlobM, i64 %40
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %62 = getelementptr double, ptr %56, i64 %61
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %74 = getelementptr double, ptr @GlobM, i64 %73
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %76 = getelementptr double, ptr %84, i64 %73
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %74 = getelementptr double, ptr @GlobM, i64 %73
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %98 = getelementptr double, ptr @GlobC, i64 %97
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %100 = getelementptr double, ptr @GlobG, i64 %97
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %102 = getelementptr double, ptr @GlobE, i64 %97
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %104 = getelementptr double, ptr @GlobI, i64 %97
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %110 = getelementptr double, ptr @GlobD, i64 %109
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %113 = getelementptr double, ptr @GlobH, i64 %109
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %117 = getelementptr double, ptr @GlobF, i64 %109
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %121 = getelementptr double, ptr @GlobJ, i64 %109
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %128 = getelementptr double, ptr @GlobM, i64 %55
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %145 = getelementptr double, ptr %11, i64 %143
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %gep.us = getelementptr i8, ptr %invariant.gep.us, i64 %.idx234.us
-; CHECK-NEXT:    Unsafe
-; CHECK-NEXT:        %51 = getelementptr i8, ptr %50, i64 -8
-; CHECK-NEXT:    Unsafe
-; CHECK-NEXT:        %89 = getelementptr i8, ptr %88, i64 -8
-; CHECK-NEXT:    Safe
-; CHECK-NEXT:        %126 = getelementptr i8, ptr %gep.us.us.us.us.us.us, i64 -8008
-; CHECK-NEXT:    Unsafe
-; CHECK-NEXT:        %131 = getelementptr i8, ptr %53, i64 %.idx244.us
 ; CHECK-NEXT:  Context for (zext i32 (0 smax %172) to i64):
 ; CHECK-NEXT:    (zext i32 (0 smax %172) to i64) sge 1
 ; CHECK-NEXT:    (zext i32 (0 smax %172) to i64) sle 1000

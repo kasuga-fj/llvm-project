@@ -3,10 +3,33 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
 
 #define DEBUG_TYPE "execution-domain"
 
 using namespace llvm;
+
+namespace {
+
+enum class TestType {
+  ExecutionDomain,
+  LoopInspect,
+  InequalitySimplification,
+};
+
+} // anonymous namespace
+
+static cl::opt<TestType> LitTestType(
+    "execution-domain-test", cl::MiscFlags::CommaSeparated, cl::Hidden,
+    cl::desc("Component that runs in the printer pass"),
+    cl::init(TestType::ExecutionDomain),
+    cl::values(clEnumValN(TestType::ExecutionDomain, "execution-domain",
+                          "ExecutionDomain"),
+               clEnumValN(TestType::LoopInspect, "loop-inspect",
+                          "LoopNestInspector"),
+               clEnumValN(TestType::InequalitySimplification,
+                          "inequality-simplification", "InequalitySimpliler")));
 
 static SmallPtrSet<const SCEV *, 4> computeComplexity(const SCEV *S) {
   struct FindUnknown {
@@ -163,7 +186,7 @@ struct MemAccessConstraint {
 using MemAccessConstraints = SmallVector<MemAccessConstraint, 4>;
 
 MemAccessConstraints collectConstraints(Function &F, ScalarEvolution &SE,
-                                        LoopInfo &LI) {
+                                        const LoopInfo &LI) {
   MemAccessConstraints Result;
   for (Instruction &Inst : instructions(F)) {
     if (!isa<LoadInst, StoreInst>(&Inst))
@@ -445,10 +468,7 @@ private:
 
 } // anonymous namespace
 
-/// Returns true if \p Ptr is used by certain memory access at every iteration
-/// of \p L.
-static bool isPtrUsedAtEveryIteration(Value *Ptr, const Loop *L,
-                                      const DominatorTree &DT) {
+bool LoopNestInspector::isPtrUsedAtEveryIteration(Value *Ptr, const Loop *L) {
   auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
   if (!GEP)
     return false;
@@ -470,28 +490,30 @@ static bool isPtrUsedAtEveryIteration(Value *Ptr, const Loop *L,
   return false;
 }
 
-/// Returns true if \p Outer has an exact BTC and \p Inner is executed at every
-/// iteration of \p Outer.
-static bool isInnerLoopExecutedAtEveryIteration(const Loop *Inner,
-                                                const Loop *Outer,
-                                                const DominatorTree &DT,
-                                                ScalarEvolution &SE) {
-  if (!SE.hasLoopInvariantBackedgeTakenCount(Outer))
-    return false;
+bool LoopNestInspector::isInnerLoopExecutedAtEveryIteration(const Loop *Inner) {
+  auto Ite = Checked.find(Inner);
+  if (Ite != Checked.end())
+    return Ite->second;
 
-  const BasicBlock *OuterLatch = Outer->getLoopLatch();
-  if (!OuterLatch)
-    return false;
-  const BasicBlock *InnerHeader = Inner->getHeader();
-  if (!DT.dominates(InnerHeader, OuterLatch))
-    return false;
-  return true;
+  auto Res = [&] {
+    const Loop *Outer = Inner->getParentLoop();
+    assert(Outer && "Inner loop must have a parent loop.");
+    if (!SE.hasLoopInvariantBackedgeTakenCount(Outer))
+      return false;
+
+    const BasicBlock *OuterLatch = Outer->getLoopLatch();
+    if (!OuterLatch)
+      return false;
+    const BasicBlock *InnerHeader = Inner->getHeader();
+    if (!DT.dominates(InnerHeader, OuterLatch))
+      return false;
+    return true;
+  }();
+  return Checked[Inner] = Res;
 }
 
-static bool isSafeToEstimateMaxValueRec(const SCEV *S, const Loop *Inner,
-                                        const Loop *Outermost,
-                                        const DominatorTree &DT,
-                                        ScalarEvolution &SE) {
+bool LoopNestInspector::isSafeToEstimateMaxOffsetValueRec(
+    const SCEV *S, const Loop *Inner, const Loop *Outermost) {
   const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S);
   if (!AR)
     return SE.isLoopInvariant(S, Outermost);
@@ -501,26 +523,15 @@ static bool isSafeToEstimateMaxValueRec(const SCEV *S, const Loop *Inner,
 
   const Loop *Outer = Inner->getParentLoop();
   assert(Outer && "Inner loop must have a parent loop.");
-  if (!isInnerLoopExecutedAtEveryIteration(Inner, Outer, DT, SE))
+  if (!isInnerLoopExecutedAtEveryIteration(Inner))
     return false;
 
   const SCEV *Next = AR->getLoop() == Outer ? AR->getStart() : AR;
-  return isSafeToEstimateMaxValueRec(Next, Outer, Outermost, DT, SE);
+  return isSafeToEstimateMaxOffsetValueRec(Next, Outer, Outermost);
 }
 
-/// Assume that the \p Ptr is surrounded by N nested loops, Returns true if we
-/// can prove that the \p Ptr is used by certain memory access for every
-/// combination of (i_1, ..., i_N) where:
-///
-///   - i_k denotes the iteration number of the k-th loop surrounding the \p
-///   Ptr.
-///   - 0 <= i_k < BTC_k where BTC_k is the exact backedge taken count of the
-///   k-th loop.
-///
-/// If either of the loops does not have an exact BTC, then returns false.
-static bool isSafeToEstimateMaxOffsetValue(Value *Ptr, const Loop *Outermost,
-                                           const DominatorTree &DT,
-                                           ScalarEvolution &SE) {
+bool LoopNestInspector::isSafeToEstimateMaxOffsetValue(Value *Ptr,
+                                                       const Loop *Outermost) {
   const SCEV *S = SE.removePointerBase(SE.getSCEV(Ptr));
   const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S);
   if (!AR)
@@ -529,10 +540,10 @@ static bool isSafeToEstimateMaxOffsetValue(Value *Ptr, const Loop *Outermost,
   if (!AR->isAffine())
     return false;
 
-  if (!isPtrUsedAtEveryIteration(Ptr, AR->getLoop(), DT))
+  if (!isPtrUsedAtEveryIteration(Ptr, AR->getLoop()))
     return false;
-  return isSafeToEstimateMaxValueRec(AR->getStart(), AR->getLoop(), Outermost,
-                                     DT, SE);
+  return isSafeToEstimateMaxOffsetValueRec(AR->getStart(), AR->getLoop(),
+                                           Outermost);
 }
 
 static const SCEV *estimateMaxOffsetValueAux(const SCEV *S,
@@ -560,9 +571,9 @@ static const SCEV *estimateMaxOffsetValueAux(const SCEV *S,
 
 static const SCEV *estimateMaxOffsetValue(Value *Ptr, const Loop *OutermostLoop,
                                           ExecutionDomain &ED,
-                                          const DominatorTree &DT) {
+                                          LoopNestInspector &LNI) {
   ScalarEvolution &SE = ED.getSE();
-  if (!isSafeToEstimateMaxOffsetValue(Ptr, OutermostLoop, DT, SE))
+  if (!LNI.isSafeToEstimateMaxOffsetValue(Ptr, OutermostLoop))
     return nullptr;
   const SCEV *S = SE.removePointerBase(SE.getSCEV(Ptr));
   return estimateMaxOffsetValueAux(S, ED);
@@ -750,34 +761,94 @@ static void traverseLoop(const Loop *L, ExecutionDomain &ED) {
     traverseLoop(Sub, ED);
 }
 
-static void printExecutionDomain(raw_ostream &OS, Function &F,
-                                 ScalarEvolution &SE, LoopInfo &LI,
-                                 const DominatorTree &DT) {
-  OS << "Printing analysis 'Execution Domain' for function '" << F.getName()
-     << "':\n";
-
-  ExecutionDomain ED(SE);
+void ExecutionDomain::run(Function &F, const LoopInfo &LI,
+                          const DominatorTree &DT) {
+  LoopNestInspector LNI(DT, LI, SE);
 
   for (const Loop *L : LI)
-    traverseLoop(L, ED);
+    traverseLoop(L, *this);
 
+  auto Inequalities = collectConstraints(F, SE, LI);
+
+  for (auto &[Ptr, DerefBytes, Complexity, Outermost] : Inequalities) {
+    const SCEV *Max = estimateMaxOffsetValue(Ptr, Outermost, *this, LNI);
+    if (Max) {
+      InequalityType Inequality(ICmpInst::ICMP_SLE, Max, DerefBytes);
+      addInequality(Inequality);
+    }
+  }
+}
+
+static void printLoopInspect(raw_ostream &OS, Function &F, ScalarEvolution &SE,
+                             const LoopInfo &LI, const DominatorTree &DT) {
+  LoopNestInspector LNI(DT, LI, SE);
   auto Inequalities = collectConstraints(F, SE, LI);
 
   OS << "Is safe to estimate max offset value for each pointer...\n";
   for (auto &[Ptr, DerefBytes, Complexity, Outermost] : Inequalities) {
-    bool Safe = isSafeToEstimateMaxOffsetValue(Ptr, Outermost, DT, SE);
+    bool Safe = LNI.isSafeToEstimateMaxOffsetValue(Ptr, Outermost);
     OS.indent(2) << (Safe ? "Safe" : "Unsafe") << "\n";
     OS.indent(4) << *Ptr << "\n";
   }
+}
 
-  for (auto &[Ptr, DerefBytes, Complexity, Outermost] : Inequalities) {
-    const SCEV *Max = estimateMaxOffsetValue(Ptr, Outermost, ED, DT);
-    if (Max) {
-      InequalityType Inequality(ICmpInst::ICMP_SLE, Max, DerefBytes);
-      ED.addInequality(Inequality);
+static void printInequalitySimplification(raw_ostream &OS, Function &F,
+                                          ScalarEvolution &SE,
+                                          const LoopInfo &LI,
+                                          const DominatorTree &DT) {
+  ExecutionDomain ED(SE);
+  for (Instruction &Inst : instructions(F)) {
+    ICmpInst *ICmp = dyn_cast<ICmpInst>(&Inst);
+    if (!ICmp)
+      continue;
+    const SCEV *LHS = SE.getSCEV(ICmp->getOperand(0));
+    const SCEV *RHS = SE.getSCEV(ICmp->getOperand(1));
+    ICmpInst::Predicate Pred = ICmp->getPredicate();
+    if (!isa<SCEVConstant>(RHS)) {
+      Pred = ICmpInst::getSwappedPredicate(Pred);
+      std::swap(LHS, RHS);
     }
+    if (!isa<SCEVConstant>(RHS))
+      continue;
+
+    InequalityType Original(Pred, LHS, cast<SCEVConstant>(RHS)->getAPInt());
+    std::optional<InequalityType> Simplified =
+        InequalitySimpliler::simplify(Original, ED);
+    OS << "Original:\n";
+    OS.indent(2) << Original << "\n";
+    OS << "Simplified:\n";
+    OS.indent(2);
+    if (Simplified)
+      OS << "Simplified: " << *Simplified << "\n";
+    else
+      OS << "Failed to simplify.\n";
   }
+}
+
+static void printExecutionDomain(raw_ostream &OS, Function &F,
+                                 ScalarEvolution &SE, const LoopInfo &LI,
+                                 const DominatorTree &DT) {
+  ExecutionDomain ED(SE);
+  ED.run(F, LI, DT);
   ED.print(OS);
+}
+
+static void printEntry(raw_ostream &OS, Function &F, ScalarEvolution &SE,
+                       LoopInfo &LI, const DominatorTree &DT) {
+  OS << "Printing analysis 'Execution Domain' for function '" << F.getName()
+     << "':\n";
+
+  switch (LitTestType) {
+  case TestType::ExecutionDomain:
+    printExecutionDomain(OS, F, SE, LI, DT);
+    break;
+  case TestType::LoopInspect:
+    printLoopInspect(OS, F, SE, LI, DT);
+    break;
+  case TestType::InequalitySimplification:
+    printInequalitySimplification(OS, F, SE, LI, DT);
+    break;
+  }
 }
 
 ExecutionDomainPrinterPass::ExecutionDomainPrinterPass(raw_ostream &OS)
@@ -788,6 +859,6 @@ PreservedAnalyses ExecutionDomainPrinterPass::run(Function &F,
   auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
-  printExecutionDomain(OS, F, SE, LI, DT);
+  printEntry(OS, F, SE, LI, DT);
   return PreservedAnalyses::all();
 }

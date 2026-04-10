@@ -10,7 +10,6 @@
 ;
 define void @f(ptr %A, i64 %m, i64 %n, i64 %o) {
 ; CHECK-LABEL: 'f'
-; CHECK-NEXT:  Is safe to estimate max offset value for each pointer...
 ; CHECK-NEXT:  Context for %m:
 ; CHECK-NEXT:    %m sge 1
 ; CHECK-NEXT:    %m sle 9223372036854775807
