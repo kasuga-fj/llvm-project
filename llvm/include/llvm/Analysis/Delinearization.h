@@ -14,6 +14,7 @@
 #ifndef LLVM_ANALYSIS_DELINEARIZATION_H
 #define LLVM_ANALYSIS_DELINEARIZATION_H
 
+#include "llvm/Analysis/ExecutionDomain.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Value.h"
 
@@ -159,6 +160,14 @@ bool getIndexExpressionsFromGEP(ScalarEvolution &SE,
                                 const GetElementPtrInst *GEP,
                                 SmallVectorImpl<const SCEV *> &Subscripts,
                                 SmallVectorImpl<const SCEV *> &Sizes);
+
+using PseudoDelinearizationResult = SmallVector<const SCEVAddRecExpr *, 4>;
+
+std::optional<PseudoDelinearizationResult>
+pseudoDelinearize(const SCEV *S, ExecutionDomain &ED);
+
+bool validatePseudoDelinearizationResult(
+    const PseudoDelinearizationResult &Result, ExecutionDomain &ED);
 
 struct DelinearizationPrinterPass
     : public RequiredPassInfoMixin<DelinearizationPrinterPass> {

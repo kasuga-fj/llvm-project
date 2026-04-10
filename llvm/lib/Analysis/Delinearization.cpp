@@ -18,6 +18,7 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -799,12 +800,136 @@ bool llvm::getIndexExpressionsFromGEP(ScalarEvolution &SE,
   return !Subscripts.empty();
 }
 
+static bool collectDimensionsRec(const SCEV *S, ScalarEvolution &SE,
+                                 PseudoDelinearizationResult &Result) {
+  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S);
+  if (!AR)
+    return S->isZero();
+
+  if (!AR->isAffine())
+    return false;
+
+  const SCEV *Start = AR->getStart();
+  const SCEV *Step = AR->getStepRecurrence(SE);
+  const SCEVAddRecExpr *NewAR = dyn_cast<SCEVAddRecExpr>(
+      SE.getAddRecExpr(SE.getZero(Step->getType()), Step, AR->getLoop(),
+                       SCEVAddRecExpr::FlagAnyWrap));
+  Result.push_back(NewAR);
+  return collectDimensionsRec(Start, SE, Result);
+}
+
+static std::optional<PseudoDelinearizationResult>
+collectDimensions(const SCEV *S, ScalarEvolution &SE) {
+  PseudoDelinearizationResult Result;
+  if (collectDimensionsRec(S, SE, Result))
+    return Result;
+  return std::nullopt;
+}
+
+static bool sortByStride(PseudoDelinearizationResult &Result,
+                         ExecutionDomain &ED) {
+  ScalarEvolution &SE = ED.getSE();
+  for (unsigned N = 0; N + 1 < Result.size(); N++) {
+    unsigned Bound = Result.size() - N;
+    for (unsigned I = 0; I + 1 < Bound; I++) {
+      unsigned J = I + 1;
+      const SCEV *StrideI = ED.rewrite(Result[I]->getStepRecurrence(SE));
+      const SCEV *StrideJ = ED.rewrite(Result[J]->getStepRecurrence(SE));
+      if (SE.isKnownPredicate(ICmpInst::ICMP_SLE, StrideI, StrideJ))
+        continue;
+      if (SE.isKnownPredicate(ICmpInst::ICMP_SGE, StrideI, StrideJ)) {
+        std::swap(Result[I], Result[J]);
+      } else {
+        dbgs() << "Failed to sort by stride: cannot compare " << *StrideI
+               << " and " << *StrideJ << "\n";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+std::optional<PseudoDelinearizationResult>
+llvm::pseudoDelinearize(const SCEV *S, ExecutionDomain &ED) {
+  std::optional<PseudoDelinearizationResult> Result =
+      collectDimensions(S, ED.getSE());
+  if (!Result)
+    return std::nullopt;
+  if (!sortByStride(*Result, ED))
+    return std::nullopt;
+  return Result;
+}
+
+bool llvm::validatePseudoDelinearizationResult(
+    const PseudoDelinearizationResult &Result, ExecutionDomain &ED) {
+  ScalarEvolution &SE = ED.getSE();
+  const SCEV *Acc = SE.getZero(Result[0]->getType());
+  for (const SCEVAddRecExpr *AR : Result) {
+    const SCEV *Subscript = ED.rewrite(AR);
+    dbgs() << "Validating subscript: " << *Subscript << "\n";
+    const SCEV *Stride = ED.rewrite(AR->getStepRecurrence(SE));
+    if (!SE.isKnownNonNegative(Subscript)) {
+      dbgs() << "Validation failed: 0 <=s " << *Subscript << "\n";
+      return false;
+    }
+    if (!SE.isKnownPredicate(ICmpInst::ICMP_SLT, ED.rewrite(Acc), Stride)) {
+      dbgs() << "Validation failed: " << *Acc << " <s " << *Stride << "\n";
+      return false;
+    }
+    const SCEV *Add = [&]() -> const SCEV * {
+      const SCEVAddRecExpr *NewAR = dyn_cast<SCEVAddRecExpr>(Subscript);
+      if (!NewAR)
+        return AR;
+      assert(NewAR->isAffine() && "Expected affine AddRecExpr in subscript");
+
+      if (!SE.hasLoopInvariantBackedgeTakenCount(NewAR->getLoop()))
+        return AR;
+      const SCEV *BTC = SE.getBackedgeTakenCount(NewAR->getLoop());
+      dbgs() << "Backedge taken count for loop " << NewAR->getLoop()->getName()
+             << ": " << *BTC << "\n";
+      dbgs() << "AR: " << *NewAR << "\n";
+      const SCEV *Start = NewAR->getStart();
+      const SCEV *Step = NewAR->getStepRecurrence(SE);
+      bool NoWrap = [&] {
+        if (NewAR->hasNoSignedWrap())
+          return true;
+        ConstantRange StartRange = SE.getSignedRange(Start);
+        ConstantRange StepRange = SE.getSignedRange(Step);
+        ConstantRange BTCRange = SE.getSignedRange(ED.rewrite(BTC));
+        dbgs() << "Start range: " << StartRange << "\n";
+        dbgs() << "Step range: " << StepRange << "\n";
+        dbgs() << "BTC range: " << BTCRange << "\n";
+        ConstantRange Mul = StepRange.smul_fast(BTCRange);
+        if (Mul.isFullSet())
+          return false;
+        return Mul.signedAddMayOverflow(StartRange) ==
+               ConstantRange::OverflowResult::NeverOverflows;
+      }();
+      if (!NoWrap)
+        return AR;
+      if (SE.isKnownNonPositive(Step))
+        return AR->getStart();
+      if (SE.isKnownNonNegative(Step))
+        return AR->evaluateAtIteration(BTC, SE);
+      return AR;
+    }();
+
+    dbgs() << "Add: " << *Add << "\n";
+
+    // TODO: Add may overflow.
+    Acc = SE.getAddExpr(Acc, Add);
+  }
+  return true;
+}
+
 namespace {
 
 void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
-                          ScalarEvolution *SE) {
+                          ScalarEvolution *SE, const DominatorTree &DT) {
   O << "Printing analysis 'Delinearization' for function '" << F->getName()
     << "':";
+  ExecutionDomain ED(*SE);
+  ED.run(*F, *LI, DT);
   for (Instruction &Inst : instructions(F)) {
     // Only analyze loads and stores.
     if (!isa<StoreInst>(&Inst) && !isa<LoadInst>(&Inst))
@@ -865,6 +990,22 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
       bool IsValid = validateDelinearizationResult(*SE, Sizes, Subscripts);
       O << "Delinearization validation: " << (IsValid ? "Succeeded" : "Failed")
         << "\n";
+
+      O << "Pseudo delinearization:\n";
+      std::optional<PseudoDelinearizationResult> PseudoResult =
+          pseudoDelinearize(AccessFn, ED);
+      if (!PseudoResult) {
+        O << "failed to pseudo delinearize\n";
+        continue;
+      }
+      O << "Strides";
+      for (const SCEVAddRecExpr *AR : reverse(*PseudoResult))
+        O << "[" << *AR->getStepRecurrence(*SE) << "]";
+      O << "\n";
+      O << "Validation: "
+        << (validatePseudoDelinearizationResult(*PseudoResult, ED) ? "Succeeded"
+                                                                   : "Failed")
+        << "\n";
   }
 }
 
@@ -875,6 +1016,7 @@ DelinearizationPrinterPass::DelinearizationPrinterPass(raw_ostream &OS)
 PreservedAnalyses DelinearizationPrinterPass::run(Function &F,
                                                   FunctionAnalysisManager &AM) {
   printDelinearization(OS, &F, &AM.getResult<LoopAnalysis>(F),
-                       &AM.getResult<ScalarEvolutionAnalysis>(F));
+                       &AM.getResult<ScalarEvolutionAnalysis>(F),
+                       AM.getResult<DominatorTreeAnalysis>(F));
   return PreservedAnalyses::all();
 }
