@@ -10,18 +10,18 @@
 ;
 define void @f(ptr %A, i64 %m, i64 %n, i64 %o) {
 ; CHECK-LABEL: 'f'
-; CHECK-NEXT:  Context for %m:
-; CHECK-NEXT:    %m sge 1
-; CHECK-NEXT:    %m sle 9223372036854775807
-; CHECK-NEXT:  Context for %o:
-; CHECK-NEXT:    %o sge 1
-; CHECK-NEXT:    %o sle 9223372036854775807
-; CHECK-NEXT:  Context for %n:
-; CHECK-NEXT:    %n sge 1
-; CHECK-NEXT:    %n sle 9223372036854775807
-; CHECK-NEXT:  Range for %m: [1,-9223372036854775808)
-; CHECK-NEXT:  Range for %o: [1,-9223372036854775808)
-; CHECK-NEXT:  Range for %n: [1,-9223372036854775808)
+; CHECK-NEXT:  Context for (-1 + %m):
+; CHECK-NEXT:    (-1 + %m) sge 0
+; CHECK-NEXT:    (-1 + %m) sle 9223372036854775806
+; CHECK-NEXT:  Context for (-1 + %n):
+; CHECK-NEXT:    (-1 + %n) sge 0
+; CHECK-NEXT:    (-1 + %n) sle 9223372036854775806
+; CHECK-NEXT:  Context for (-1 + %o):
+; CHECK-NEXT:    (-1 + %o) sge 0
+; CHECK-NEXT:    (-1 + %o) sle 9223372036854775806
+; CHECK-NEXT:  Rewritten SCEV for (-1 + %m) --> (9223372036854775806 smin (0 smax (-1 + %m))): [0,9223372036854775807)
+; CHECK-NEXT:  Rewritten SCEV for (-1 + %n) --> (9223372036854775806 smin (0 smax (-1 + %n))): [0,9223372036854775807)
+; CHECK-NEXT:  Rewritten SCEV for (-1 + %o) --> (9223372036854775806 smin (0 smax (-1 + %o))): [0,9223372036854775807)
 ;
 entry:
   %m.pos = icmp sgt i64 %m, 0

@@ -76,8 +76,6 @@ define void @test(ptr noalias readonly captures(none) %0, ptr noalias readonly c
 ; CHECK-NEXT:  Context for (zext i32 (0 smax %134) to i64):
 ; CHECK-NEXT:    (zext i32 (0 smax %134) to i64) sge 1
 ; CHECK-NEXT:    (zext i32 (0 smax %134) to i64) sle 2501
-; CHECK-NEXT:  Context for ((sext i32 %20 to i64) * (sext i32 %17 to i64)):
-; CHECK-NEXT:    ((sext i32 %20 to i64) * (sext i32 %17 to i64)) sle 1000
 ; CHECK-NEXT:  Context for (sext i32 %17 to i64):
 ; CHECK-NEXT:    (sext i32 %17 to i64) sge 1
 ; CHECK-NEXT:    (sext i32 %17 to i64) sle 54
@@ -90,16 +88,18 @@ define void @test(ptr noalias readonly captures(none) %0, ptr noalias readonly c
 ; CHECK-NEXT:  Context for ((zext i32 (0 smax %23) to i64) + (sext i1 %31 to i64)):
 ; CHECK-NEXT:    ((zext i32 (0 smax %23) to i64) + (sext i1 %31 to i64)) sge 0
 ; CHECK-NEXT:    ((zext i32 (0 smax %23) to i64) + (sext i1 %31 to i64)) sle 2500
-; CHECK-NEXT:  Context for ((8000 * (sext i1 %31 to i64))<nsw> + (8008 * (zext i32 (0 smax %23) to i64))<nuw><nsw>):
-; CHECK-NEXT:    ((8000 * (sext i1 %31 to i64))<nsw> + (8008 * (zext i32 (0 smax %23) to i64))<nuw><nsw>) sle 8000008
-; CHECK-NEXT:  Range for (zext i32 (0 smax %172) to i64): [1,1001)
-; CHECK-NEXT:  Range for (zext i32 (0 smax %134) to i64): [1,2502)
-; CHECK-NEXT:  Range for ((sext i32 %20 to i64) * (sext i32 %17 to i64)): [1,1001)
-; CHECK-NEXT:  Range for (sext i32 %17 to i64): [1,55)
-; CHECK-NEXT:  Range for (sext i32 %20 to i64): [1,55)
-; CHECK-NEXT:  Range for (zext i32 (0 smax %23) to i64): [1,2502)
-; CHECK-NEXT:  Range for ((zext i32 (0 smax %23) to i64) + (sext i1 %31 to i64)): [0,2501)
-; CHECK-NEXT:  Range for ((8000 * (sext i1 %31 to i64))<nsw> + (8008 * (zext i32 (0 smax %23) to i64))<nuw><nsw>): [8,8000009)
+; CHECK-NEXT:  Context for (-8 + (8000 * (sext i1 %31 to i64))<nsw> + (8008 * (zext i32 (0 smax %23) to i64))<nuw><nsw>):
+; CHECK-NEXT:    (-8 + (8000 * (sext i1 %31 to i64))<nsw> + (8008 * (zext i32 (0 smax %23) to i64))<nuw><nsw>) sle 8000000
+; CHECK-NEXT:  Context for ((sext i32 %20 to i64) * (sext i32 %17 to i64)):
+; CHECK-NEXT:    ((sext i32 %20 to i64) * (sext i32 %17 to i64)) sle 1000
+; CHECK-NEXT:  Rewritten SCEV for (zext i32 (0 smax %172) to i64) --> (1000 smin (1 smax (zext i32 (0 smax %172) to i64))): [1,1001)
+; CHECK-NEXT:  Rewritten SCEV for (zext i32 (0 smax %134) to i64) --> (2501 smin (1 smax (zext i32 (0 smax %134) to i64))): [1,2502)
+; CHECK-NEXT:  Rewritten SCEV for (sext i32 %17 to i64) --> (54 smin (1 smax (sext i32 %17 to i64))): [1,55)
+; CHECK-NEXT:  Rewritten SCEV for (sext i32 %20 to i64) --> (54 smin (1 smax (sext i32 %20 to i64))): [1,55)
+; CHECK-NEXT:  Rewritten SCEV for (zext i32 (0 smax %23) to i64) --> (2501 smin (1 smax (zext i32 (0 smax %23) to i64))): [1,2502)
+; CHECK-NEXT:  Rewritten SCEV for ((zext i32 (0 smax %23) to i64) + (sext i1 %31 to i64)) --> (2500 smin ((sext i1 %31 to i64) + (2501 smin (1 smax (zext i32 (0 smax %23) to i64))))): [0,2501)
+; CHECK-NEXT:  Rewritten SCEV for (-8 + (8000 * (sext i1 %31 to i64))<nsw> + (8008 * (zext i32 (0 smax %23) to i64))<nuw><nsw>) --> (8000000 smin (-8 + (8000 * (sext i1 %31 to i64))<nsw> + (8008 * (2501 smin (1 smax (zext i32 (0 smax %23) to i64))))<nuw><nsw>)): [0,8000001)
+; CHECK-NEXT:  Rewritten SCEV for ((sext i32 %20 to i64) * (sext i32 %17 to i64)) --> (1000 smin ((54 smin (1 smax (sext i32 %20 to i64))) * (54 smin (1 smax (sext i32 %17 to i64))))): [1,1001)
 ;
   %11 = alloca [2500 x double], align 8
   %12 = load i32, ptr %4, align 4

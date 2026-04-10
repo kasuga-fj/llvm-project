@@ -72,28 +72,24 @@ private:
 };
 
 struct ExecutionDomain {
+  using ContextsType =
+      DenseMap<const SCEV *, DenseMap<ICmpInst::Predicate, InequalityType>>;
+
   ExecutionDomain(ScalarEvolution &SE) : SE(SE) {}
 
   void run(Function &F, const LoopInfo &LI, const DominatorTree &DT);
 
   void addInequality(const InequalityType &Inequality);
 
-  bool hasContext(const SCEV *S) const { return Contexts.contains(S); }
-
-  bool isKnownNonNegative(const SCEV *S);
-
-  bool isKnownNonPositive(const SCEV *S);
-
   ScalarEvolution &getSE() const { return SE; }
 
-  ConstantRange withContext(const SCEV *S, ConstantRange Range);
+  const SCEV *rewrite(const SCEV *S);
 
   void print(raw_ostream &OS);
 
 private:
   ScalarEvolution &SE;
-  DenseMap<const SCEV *, DenseMap<ICmpInst::Predicate, InequalityType>>
-      Contexts;
+  ContextsType Contexts;
 };
 
 struct ExecutionDomainPrinterPass
