@@ -71,11 +71,21 @@ private:
                                          const Loop *Outermost);
 };
 
-struct ExecutionDomain {
-  using ContextsType =
-      DenseMap<const SCEV *, DenseMap<ICmpInst::Predicate, InequalityType>>;
+struct ExecutionDomain;
 
-  ExecutionDomain(ScalarEvolution &SE) : SE(SE) {}
+struct ExecutionDomainRewriter : public SCEVRewriteVisitor<ExecutionDomainRewriter> {
+  using Base = SCEVRewriteVisitor<ExecutionDomainRewriter>;
+
+  ExecutionDomainRewriter(const ExecutionDomain &ED);
+
+  const SCEV *visit(const SCEV *S);
+
+private:
+  const ExecutionDomain &ED;
+};
+
+struct ExecutionDomain {
+  ExecutionDomain(ScalarEvolution &SE);
 
   void run(Function &F, const LoopInfo &LI, const DominatorTree &DT);
 
@@ -87,9 +97,18 @@ struct ExecutionDomain {
 
   void print(raw_ostream &OS);
 
+  bool isAddRecNoSignedWrap(const SCEVAddRecExpr *AR);
+
+  bool isKnownPositive(const SCEV *S);
+  bool isKnownNonNegative(const SCEV *S);
+  bool isKnownNonPositive(const SCEV *S);
+  bool isKnownPredicate(ICmpInst::Predicate Pred, const SCEV *LHS, const SCEV *RHS);
+
 private:
   ScalarEvolution &SE;
-  ContextsType Contexts;
+  DenseMap<const SCEV *, DenseMap<ICmpInst::Predicate, InequalityType>> Contexts;
+
+  friend struct ExecutionDomainRewriter;
 };
 
 struct ExecutionDomainPrinterPass

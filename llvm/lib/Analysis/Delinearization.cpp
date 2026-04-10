@@ -833,11 +833,11 @@ static bool sortByStride(PseudoDelinearizationResult &Result,
     unsigned Bound = Result.size() - N;
     for (unsigned I = 0; I + 1 < Bound; I++) {
       unsigned J = I + 1;
-      const SCEV *StrideI = ED.rewrite(Result[I]->getStepRecurrence(SE));
-      const SCEV *StrideJ = ED.rewrite(Result[J]->getStepRecurrence(SE));
-      if (SE.isKnownPredicate(ICmpInst::ICMP_SLE, StrideI, StrideJ))
+      const SCEV *StrideI = Result[I]->getStepRecurrence(SE);
+      const SCEV *StrideJ = Result[J]->getStepRecurrence(SE);
+      if (ED.isKnownPredicate(ICmpInst::ICMP_SLE, StrideI, StrideJ))
         continue;
-      if (SE.isKnownPredicate(ICmpInst::ICMP_SGE, StrideI, StrideJ)) {
+      if (ED.isKnownPredicate(ICmpInst::ICMP_SGE, StrideI, StrideJ)) {
         std::swap(Result[I], Result[J]);
       } else {
         dbgs() << "Failed to sort by stride: cannot compare " << *StrideI
@@ -865,56 +865,32 @@ bool llvm::validatePseudoDelinearizationResult(
   ScalarEvolution &SE = ED.getSE();
   const SCEV *Acc = SE.getZero(Result[0]->getType());
   for (const SCEVAddRecExpr *AR : Result) {
-    const SCEV *Subscript = ED.rewrite(AR);
-    dbgs() << "Validating subscript: " << *Subscript << "\n";
-    const SCEV *Stride = ED.rewrite(AR->getStepRecurrence(SE));
-    if (!SE.isKnownNonNegative(Subscript)) {
-      dbgs() << "Validation failed: 0 <=s " << *Subscript << "\n";
+    const SCEV *Stride = AR->getStepRecurrence(SE);
+    if (!ED.isKnownNonNegative(AR)) {
       return false;
     }
-    if (!SE.isKnownPredicate(ICmpInst::ICMP_SLT, ED.rewrite(Acc), Stride)) {
-      dbgs() << "Validation failed: " << *Acc << " <s " << *Stride << "\n";
+#if 0
+    if (!ED.isKnownPredicate(ICmpInst::ICMP_SLT, Acc, Stride)) {
+      //return false;
+    }
+#else
+    const SCEV *Diff = SE.getMinusSCEV(Stride, Acc);
+    if (!ED.isKnownPositive(Diff)) {
       return false;
     }
+#endif
     const SCEV *Add = [&]() -> const SCEV * {
-      const SCEVAddRecExpr *NewAR = dyn_cast<SCEVAddRecExpr>(Subscript);
-      if (!NewAR)
+      const SCEV *Step = AR->getStepRecurrence(SE);
+      if (!ED.isAddRecNoSignedWrap(AR))
         return AR;
-      assert(NewAR->isAffine() && "Expected affine AddRecExpr in subscript");
-
-      if (!SE.hasLoopInvariantBackedgeTakenCount(NewAR->getLoop()))
-        return AR;
-      const SCEV *BTC = SE.getBackedgeTakenCount(NewAR->getLoop());
-      dbgs() << "Backedge taken count for loop " << NewAR->getLoop()->getName()
-             << ": " << *BTC << "\n";
-      dbgs() << "AR: " << *NewAR << "\n";
-      const SCEV *Start = NewAR->getStart();
-      const SCEV *Step = NewAR->getStepRecurrence(SE);
-      bool NoWrap = [&] {
-        if (NewAR->hasNoSignedWrap())
-          return true;
-        ConstantRange StartRange = SE.getSignedRange(Start);
-        ConstantRange StepRange = SE.getSignedRange(Step);
-        ConstantRange BTCRange = SE.getSignedRange(ED.rewrite(BTC));
-        dbgs() << "Start range: " << StartRange << "\n";
-        dbgs() << "Step range: " << StepRange << "\n";
-        dbgs() << "BTC range: " << BTCRange << "\n";
-        ConstantRange Mul = StepRange.smul_fast(BTCRange);
-        if (Mul.isFullSet())
-          return false;
-        return Mul.signedAddMayOverflow(StartRange) ==
-               ConstantRange::OverflowResult::NeverOverflows;
-      }();
-      if (!NoWrap)
-        return AR;
-      if (SE.isKnownNonPositive(Step))
+      if (ED.isKnownNonPositive(Step))
         return AR->getStart();
-      if (SE.isKnownNonNegative(Step))
+      if (ED.isKnownNonNegative(Step) && SE.hasLoopInvariantBackedgeTakenCount(AR->getLoop())) {
+        const SCEV *BTC = SE.getBackedgeTakenCount(AR->getLoop());
         return AR->evaluateAtIteration(BTC, SE);
+      }
       return AR;
     }();
-
-    dbgs() << "Add: " << *Add << "\n";
 
     // TODO: Add may overflow.
     Acc = SE.getAddExpr(Acc, Add);

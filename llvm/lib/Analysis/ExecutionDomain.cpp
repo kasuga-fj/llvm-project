@@ -225,63 +225,16 @@ MemAccessConstraints collectConstraints(Function &F, ScalarEvolution &SE,
   return Result;
 }
 
-struct ExecutionDomainRewriter
-    : public SCEVRewriteVisitor<ExecutionDomainRewriter> {
-  using Base = SCEVRewriteVisitor<ExecutionDomainRewriter>;
-  using ContextsType = ExecutionDomain::ContextsType;
-
-  ExecutionDomainRewriter(ScalarEvolution &SE, const ContextsType &Ctx)
-      : Base(SE), Ctx(Ctx) {}
-
-  const SCEV *visit(const SCEV *S) {
-    const SCEV *Res = Base::visit(S);
-    auto Ite = Ctx.find(S);
-    if (Ite == Ctx.end())
-      return Res;
-    for (const auto &[Pred, Inequality] : Ite->second) {
-      assert(Inequality.LHS == S);
-      assert(Inequality.Pred == Pred);
-      switch (Inequality.Pred) {
-      case ICmpInst::ICMP_SLE:
-        Res = SE.getSMinExpr(Res, SE.getConstant(Inequality.RHS));
-        break;
-      case ICmpInst::ICMP_SGE:
-        Res = SE.getSMaxExpr(Res, SE.getConstant(Inequality.RHS));
-        break;
-      default:
-        llvm_unreachable("Unexpected predicate");
-      }
-    }
-    return Res;
-  }
-
-private:
-  const ContextsType &Ctx;
-};
-
 struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
   using Base = SCEVVisitor<InequalitySimpliler, void>;
 
   InequalitySimpliler(const InequalityType &Inequality, ExecutionDomain &ED)
-      : ED(ED), Pred(Inequality.Pred), LHS(Inequality.LHS),
-        RHS(Inequality.RHS) {}
+      : ED(ED), Inequality(Inequality) {}
 
-  static std::optional<InequalityType>
-  simplify(const InequalityType &Inequality, ExecutionDomain &ED) {
+  static InequalityType simplify(const InequalityType &Inequality, ExecutionDomain &ED) {
     InequalitySimpliler Simplifier(Inequality, ED);
     Simplifier.visit(Inequality.LHS);
-    if (Simplifier.RHS)
-      return InequalityType(Simplifier.Pred, Simplifier.LHS, *Simplifier.RHS);
-    return std::nullopt;
-  }
-
-  void visit(const SCEV *S) {
-    if (!RHS) {
-      LLVM_DEBUG(dbgs() << "  Failed to simplify...\n");
-      return;
-    }
-    InequalityType Cur(Pred, S, *RHS);
-    Base::visit(S);
+    return Simplifier.Inequality;
   }
 
   void visitAddExpr(const SCEVAddExpr *S) {
@@ -307,10 +260,9 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
       const SCEV *Acc = SE.getZero(S->getType());
       for (const SCEV *Op : S->operands()) {
         const SCEV *RewrittenOp = ED.rewrite(Op);
-        if (!SE.willNotOverflow(Instruction::Add, /*Signed=*/true, Acc,
-                                RewrittenOp))
+        if (!SE.willNotOverflow(Instruction::Add, /*Signed=*/true, ED.rewrite(Acc), RewrittenOp))
           return false;
-        Acc = SE.getAddExpr(Acc, RewrittenOp);
+        Acc = SE.getAddExpr(Acc, Op);
       }
       return true;
     }();
@@ -318,12 +270,16 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
     if (!NoWrap)
       return;
 
+    OverflowSafeSignedAPInt RHS(Inequality.RHS);
     RHS -= C;
+    if (!RHS)
+      return;
+    Inequality.RHS = *RHS;
     if (NewOps.size() == 1) {
-      LHS = NewOps[0];
-      visit(LHS);
+      Inequality.LHS = NewOps[0];
+      visit(Inequality.LHS);
     } else {
-      LHS = ED.getSE().getAddExpr(NewOps, S->getNoWrapFlags(), 0);
+      Inequality.LHS = ED.getSE().getAddExpr(NewOps, S->getNoWrapFlags(), 0);
     }
   }
 
@@ -360,38 +316,38 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
     if (!NoWrap)
       return;
 
-    if (!RHS.isPositive())
+    if (!Inequality.RHS.isStrictlyPositive())
       return;
-    auto [Q, R] = RHS.sdivrem(C);
+    APInt Q, R;
+    APInt::sdivrem(Inequality.RHS, *C, Q, R);
     bool Update = false;
     if (R.isZero()) {
       // https://alive2.llvm.org/ce/z/fPnXoS
-      RHS = Q;
+      Inequality.RHS = Q;
       Update = true;
     } else if (C.isPositive()) {
-      assert(Pred == ICmpInst::ICMP_SLE || Pred == ICmpInst::ICMP_SGT);
-      if (Pred == ICmpInst::ICMP_SLE) {
-        if (C.isPositive() && RHS.isNonNegative() && Q.isNonZero()) {
+      assert(Inequality.Pred == ICmpInst::ICMP_SLE || Inequality.Pred == ICmpInst::ICMP_SGE);
+      if (Inequality.Pred == ICmpInst::ICMP_SLE) {
+        if (C.isPositive() && Inequality.RHS.isNonNegative() && !Q.isZero()) {
           // https://alive2.llvm.org/ce/z/f9prP4
-          RHS = Q;
+          Inequality.RHS = Q;
           Update = true;
         }
       } else {
         // https://alive2.llvm.org/ce/z/osWHWw
-        RHS = Q;
+        Inequality.RHS = Q;
         Update = true;
       }
     }
 
-    if (!Update) {
-      RHS = OverflowSafeSignedAPInt();
+    if (!Update)
       return;
-    }
+
     if (NewOps.size() == 1) {
-      LHS = NewOps[0];
-      visit(LHS);
+      Inequality.LHS = NewOps[0];
+      visit(Inequality.LHS);
     } else {
-      LHS = ED.getSE().getMulExpr(NewOps, S->getNoWrapFlags(), 0);
+      Inequality.LHS = ED.getSE().getMulExpr(NewOps, S->getNoWrapFlags(), 0);
     }
   }
 
@@ -413,9 +369,67 @@ struct InequalitySimpliler : public SCEVVisitor<InequalitySimpliler, void> {
 
 private:
   ExecutionDomain &ED;
-  CmpPredicate Pred;
-  const SCEV *LHS;
-  OverflowSafeSignedAPInt RHS;
+  InequalityType Inequality;
+};
+
+struct MulExpander : public SCEVVisitor<MulExpander, SmallVector<const SCEV *, 4>> {
+  using ResultType = SmallVector<const SCEV *, 4>;
+
+  MulExpander(ScalarEvolution &SE) : SE(SE) {}
+
+  static ResultType expand(const SCEV *S, ScalarEvolution &SE) {
+    return MulExpander(SE).visit(S);
+  }
+
+  ResultType visitAddExpr(const SCEVAddExpr *S) {
+    ResultType Result;
+    for (const SCEV *Op : S->operands()) {
+      ResultType Res = visit(Op);
+      assert(!Res.empty() && "visit must return at least one candidate.");
+      Result.append(Res.begin(), Res.end());
+    }
+    return Result;
+  }
+
+  ResultType visitMulExpr(const SCEVMulExpr *S) {
+    SmallVector<ResultType, 4> Cands;
+    for (const SCEV *Op : S->operands()) {
+      ResultType Res = visit(Op);
+      assert(!Res.empty() && "visit must return at least one candidate.");
+      Cands.push_back(std::move(Res));
+    }
+    ResultType Result;
+    mulDfs(Cands, 0, SE.getOne(S->getType()), Result);
+    return Result;
+  }
+
+  ResultType visitConstant(const SCEVConstant *S) { return {S}; }
+  ResultType visitVScale(const SCEVVScale *S) { return {S}; }
+  ResultType visitSignExtendExpr(const SCEVSignExtendExpr *S) { return {S}; }
+  ResultType visitSMinExpr(const SCEVSMinExpr *S) { return {S}; }
+  ResultType visitSMaxExpr(const SCEVSMaxExpr *S) { return {S}; }
+  ResultType visitPtrToAddrExpr(const SCEVPtrToAddrExpr *S) { return {S}; }
+  ResultType visitPtrToIntExpr(const SCEVPtrToIntExpr *S) { return {S}; }
+  ResultType visitTruncateExpr(const SCEVTruncateExpr *S) { return {S}; }
+  ResultType visitZeroExtendExpr(const SCEVZeroExtendExpr *S) { return {S}; }
+  ResultType visitUDivExpr(const SCEVUDivExpr *S) { return {S}; }
+  ResultType visitAddRecExpr(const SCEVAddRecExpr *S) { return {S}; }
+  ResultType visitUMaxExpr(const SCEVUMaxExpr *S) { return {S}; }
+  ResultType visitUMinExpr(const SCEVUMinExpr *S) { return {S}; }
+  ResultType visitUnknown(const SCEVUnknown *S) { return {S}; }
+  ResultType visitSequentialUMinExpr(const SCEVSequentialUMinExpr *S) { return {S}; }
+
+private:
+  ScalarEvolution &SE;
+
+  void mulDfs(ArrayRef<ResultType> Cands, unsigned Idx, const SCEV *Acc, ResultType &Result) {
+    if (Idx == Cands.size()) {
+      Result.push_back(Acc);
+      return;
+    }
+    for (const SCEV *Op : Cands[Idx])
+      mulDfs(Cands, Idx + 1, SE.getMulExpr(Op, Acc), Result);
+  }
 };
 
 } // anonymous namespace
@@ -507,16 +521,16 @@ static const SCEV *estimateMaxOffsetValueAux(const SCEV *S,
     return nullptr;
 
   ScalarEvolution &SE = ED.getSE();
-  const SCEV *Step = ED.rewrite(AR->getStepRecurrence(SE));
+  const SCEV *Step = AR->getStepRecurrence(SE);
   const SCEV *Start = estimateMaxOffsetValueAux(AR->getStart(), ED);
   if (!Start)
     return nullptr;
   const SCEV *BTC = SE.getBackedgeTakenCount(AR->getLoop());
   if (!BTC)
     return nullptr;
-  if (SE.isKnownNonNegative(Step))
+  if (ED.isKnownNonNegative(Step))
     return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
-  if (SE.isKnownNonPositive(Step))
+  if (ED.isKnownNonPositive(Step))
     return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
   return nullptr;
 }
@@ -531,40 +545,44 @@ static const SCEV *estimateMaxOffsetValue(Value *Ptr, const Loop *OutermostLoop,
   return estimateMaxOffsetValueAux(S, ED);
 }
 
+static std::optional<InequalityType> tryIntoSE(InequalityType I) {
+  switch (I.Pred) {
+    case ICmpInst::ICMP_SLT: {
+                               OverflowSafeSignedAPInt Tmp(I.RHS);
+                               Tmp -= 1;
+                               if (!Tmp)
+                                 break;
+                               I.Pred = ICmpInst::ICMP_SLE;
+                               I.RHS = *Tmp;
+                               [[fallthrough]];
+                             }
+    case ICmpInst::ICMP_SLE:
+                             return I;
+    case ICmpInst::ICMP_SGT: {
+                               OverflowSafeSignedAPInt Tmp(I.RHS);
+                               Tmp += 1;
+                               if (!Tmp)
+                                 break;
+                               I.Pred = ICmpInst::ICMP_SGE;
+                               I.RHS = *Tmp;
+                               [[fallthrough]];
+                             }
+    case ICmpInst::ICMP_SGE:
+                             return I;
+    default:
+                             break;
+  }
+  return std::nullopt;
+}
+
 static SmallVector<InequalityType, 2>
 canonicalizeInequality(InequalityType Inequality, ExecutionDomain &ED) {
   SmallVector<InequalityType, 2> Result;
   auto Push = [&Result](InequalityType I) {
     if (isa<SCEVConstant>(I.LHS))
       return;
-    switch (I.Pred) {
-    case ICmpInst::ICMP_SLT: {
-      OverflowSafeSignedAPInt Tmp(I.RHS);
-      Tmp -= 1;
-      if (!Tmp)
-        break;
-      I.Pred = ICmpInst::ICMP_SLE;
-      I.RHS = *Tmp;
-      [[fallthrough]];
-    }
-    case ICmpInst::ICMP_SLE:
-      Result.push_back(I);
-      break;
-    case ICmpInst::ICMP_SGT: {
-      OverflowSafeSignedAPInt Tmp(I.RHS);
-      Tmp += 1;
-      if (!Tmp)
-        break;
-      I.Pred = ICmpInst::ICMP_SGE;
-      I.RHS = *Tmp;
-      [[fallthrough]];
-    }
-    case ICmpInst::ICMP_SGE:
-      Result.push_back(I);
-      break;
-    default:
-      llvm_unreachable("Unexpected predicate");
-    }
+    if (std::optional<InequalityType> SEI = tryIntoSE(I))
+      Result.push_back(*SEI);
   };
 
   switch (Inequality.Pred) {
@@ -603,9 +621,83 @@ canonicalizeInequality(InequalityType Inequality, ExecutionDomain &ED) {
     break;
   }
   for (InequalityType &I : Result)
-    I = InequalitySimpliler::simplify(I, ED).value_or(I);
+    I = InequalitySimpliler::simplify(I, ED);
   return Result;
 }
+
+ExecutionDomainRewriter::ExecutionDomainRewriter(const ExecutionDomain &ED) : Base(ED.getSE()), ED(ED) {}
+
+static std::tuple<SCEVTypes, const SCEV *, const SCEV *> decomposeSCEV(const SCEV *S, ScalarEvolution &SE) {
+  SCEVTypes Type = S->getSCEVType();
+  const SCEVNAryExpr *NAry = nullptr;
+  if (const SCEVAddExpr *Add = dyn_cast<SCEVAddExpr>(S)) {
+    NAry = Add;
+  } else if (const SCEVMulExpr *Mul = dyn_cast<SCEVMulExpr>(S)) {
+    NAry = Mul;
+  }
+  if (!NAry)
+    return std::make_tuple(Type, S, nullptr);
+
+  SmallVector<SCEVUse, 2> Ops;
+  const SCEV *Const = nullptr;
+  for (const SCEV *Op : NAry->operands()) {
+    if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Op)) {
+      assert(!Const && "Multiple constants in an Add/Mul expression?");
+      Const = C;
+    } else {
+      Ops.push_back(Op);
+    }
+  }
+
+  const SCEV *Base = [&] {
+    switch (Type) {
+      case scAddExpr:
+        return SE.getAddExpr(Ops, NAry->getNoWrapFlags());
+      case scMulExpr:
+        return SE.getMulExpr(Ops, NAry->getNoWrapFlags());
+      default:
+        llvm_unreachable("Unexpected SCEV type");
+    }
+  }();
+  return std::make_tuple(Type, Base, Const);
+}
+
+const SCEV *ExecutionDomainRewriter::visit(const SCEV *S) {
+  auto [Type, Base, Const] = decomposeSCEV(S, SE);
+  const SCEV *Res = Base::visit(Base);
+  auto Ite = ED.Contexts.find(Base);
+  if (Ite == ED.Contexts.end())
+    return Res;
+  for (const auto &[Pred, Inequality] : Ite->second) {
+    assert(Inequality.LHS == Base);
+    assert(Inequality.Pred == Pred);
+    switch (Inequality.Pred) {
+      case ICmpInst::ICMP_SLE:
+        Res = SE.getSMinExpr(Res, SE.getConstant(Inequality.RHS));
+        break;
+      case ICmpInst::ICMP_SGE:
+        Res = SE.getSMaxExpr(Res, SE.getConstant(Inequality.RHS));
+        break;
+      default:
+        llvm_unreachable("Unexpected predicate");
+    }
+  }
+  switch (Type) {
+    case scAddExpr:
+      if (Const)
+        Res = SE.getAddExpr(Res, Const);
+      break;
+    case scMulExpr:
+      if (Const)
+        Res = SE.getMulExpr(Res, Const);
+      break;
+    default:
+      break;
+  }
+  return Res;
+}
+
+ExecutionDomain::ExecutionDomain(ScalarEvolution &SE) : SE(SE) {}
 
 void ExecutionDomain::addInequality(const InequalityType &Inequality) {
   SmallVector<InequalityType, 2> Canonicalized =
@@ -673,7 +765,12 @@ static void traverseLoop(const Loop *L, ExecutionDomain &ED) {
 }
 
 const SCEV *ExecutionDomain::rewrite(const SCEV *S) {
-  return ExecutionDomainRewriter(SE, Contexts).visit(S);
+  SmallVector<const SCEV *, 4> Terms = MulExpander::expand(S, SE);
+  ExecutionDomainRewriter Rewriter(*this);
+  SmallVector<SCEVUse, 4> NewTerms;
+  for (const SCEV *Term : Terms)
+    NewTerms.push_back(Rewriter.visit(Term));
+  return SE.getAddExpr(NewTerms);
 }
 
 void ExecutionDomain::run(Function &F, const LoopInfo &LI,
@@ -692,6 +789,60 @@ void ExecutionDomain::run(Function &F, const LoopInfo &LI,
       addInequality(Inequality);
     }
   }
+}
+
+bool ExecutionDomain::isAddRecNoSignedWrap(const SCEVAddRecExpr *AR) {
+  if (AR->hasNoSignedWrap())
+    return true;
+  if (const SCEVAddRecExpr *Rewritten = dyn_cast<SCEVAddRecExpr>(rewrite(AR)))
+    if (Rewritten->hasNoSignedWrap())
+      return true;
+
+  if (!AR->isAffine())
+    return false;
+  if (!SE.hasLoopInvariantBackedgeTakenCount(AR->getLoop()))
+    return false;
+
+  const SCEV *Start = rewrite(AR->getStart());
+  const SCEV *Step = rewrite(AR->getStepRecurrence(SE));
+  const SCEV *BTC = rewrite(SE.getBackedgeTakenCount(AR->getLoop()));
+  ConstantRange StartRange = SE.getSignedRange(Start);
+  ConstantRange StepRange = SE.getSignedRange(Step);
+  ConstantRange BTCRange = SE.getSignedRange(BTC);
+  ConstantRange Mul = StepRange.smul_fast(BTCRange);
+  if (Mul.isFullSet())
+    return false;
+  return Mul.signedAddMayOverflow(StartRange) == ConstantRange::OverflowResult::NeverOverflows;
+}
+
+bool ExecutionDomain::isKnownPositive(const SCEV *S) {
+  return SE.isKnownPositive(rewrite(S));
+}
+
+bool ExecutionDomain::isKnownNonNegative(const SCEV *S) {
+  return SE.isKnownNonNegative(rewrite(S));
+}
+
+bool ExecutionDomain::isKnownNonPositive(const SCEV *S) {
+  return SE.isKnownNonPositive(rewrite(S));
+}
+
+bool ExecutionDomain::isKnownPredicate(ICmpInst::Predicate Pred, const SCEV *LHS, const SCEV *RHS) {
+  if (isa<SCEVConstant>(LHS)) {
+    std::swap(LHS, RHS);
+    Pred = ICmpInst::getSwappedPredicate(Pred);
+  }
+  if (isa<SCEVConstant>(RHS)) {
+    InequalityType Inequality(Pred, LHS, cast<SCEVConstant>(RHS)->getAPInt());
+    if (std::optional<InequalityType> SEI = tryIntoSE(Inequality)) {
+      Inequality = InequalitySimpliler::simplify(*SEI, *this);
+      LHS = Inequality.LHS;
+      RHS = SE.getConstant(Inequality.RHS);
+      Pred = Inequality.Pred;
+    }
+  }
+
+  return SE.isKnownPredicate(Pred, rewrite(LHS), rewrite(RHS));
 }
 
 static void printLoopInspect(raw_ostream &OS, Function &F, ScalarEvolution &SE,
