@@ -978,6 +978,14 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
       for (const SCEVAddRecExpr *AR : reverse(*PseudoResult))
         O << "[" << *AR->getStepRecurrence(*SE) << "]";
       O << "\n";
+      O << "Subscripts";
+      for (const SCEVAddRecExpr *AR : reverse(*PseudoResult)) {
+        const SCEV *Zero = SE->getZero(AR->getType());
+        const SCEV *One = SE->getOne(AR->getType());
+        const SCEV *Subscript = SE->getAddRecExpr(Zero, One, AR->getLoop(), AR->getNoWrapFlags());
+        O << "[" << *Subscript << "]";
+      }
+      O << "\n";
       O << "Validation: "
         << (validatePseudoDelinearizationResult(*PseudoResult, ED) ? "Succeeded"
                                                                    : "Failed")
