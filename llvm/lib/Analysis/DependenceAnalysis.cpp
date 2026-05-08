@@ -805,7 +805,7 @@ bool DependenceInfo::checkSubscript(const SCEV *Expr, const Loop *LoopNest,
   if (!L)
     return false;
 
-  if (!AddRec->hasNoSignedWrap())
+  if (!AddRec->hasNoSignedWrap() && !ED.isAddRecNoSignedWrap(AddRec))
     return false;
 
   const SCEV *Start = AddRec->getStart();
@@ -2459,7 +2459,9 @@ bool DependenceInfo::tryDelinearize(Instruction *Src, Instruction *Dst,
   if (!tryDelinearizeFixedSize(Src, Dst, SrcAccessFn, DstAccessFn,
                                SrcSubscripts, DstSubscripts) &&
       !tryDelinearizeParametricSize(Src, Dst, SrcAccessFn, DstAccessFn,
-                                    SrcSubscripts, DstSubscripts))
+                                    SrcSubscripts, DstSubscripts) &&
+      !tryPseudoDelinearize(SrcAccessFn, DstAccessFn, SrcSubscripts,
+                            DstSubscripts))
     return false;
 
   assert(isLoopInvariant(SrcBase, SrcLoop) &&
@@ -2606,6 +2608,39 @@ bool DependenceInfo::tryDelinearizeParametricSize(
         !validateDelinearizationResult(*SE, Sizes, DstSubscripts))
       return false;
 
+  return true;
+}
+
+bool DependenceInfo::tryPseudoDelinearize(
+    const SCEV *SrcAccessFn, const SCEV *DstAccessFn,
+    SmallVectorImpl<const SCEV *> &SrcSubscripts,
+    SmallVectorImpl<const SCEV *> &DstSubscripts) {
+  SrcAccessFn = SE->removePointerBase(SrcAccessFn);
+  DstAccessFn = SE->removePointerBase(DstAccessFn);
+  std::optional<PseudoDelinearizationResult> SrcResult =
+      pseudoDelinearize(SrcAccessFn, ED);
+  std::optional<PseudoDelinearizationResult> DstResult =
+      pseudoDelinearize(DstAccessFn, ED);
+  if (!SrcResult || !DstResult)
+    return false;
+  if (SrcResult->size() != DstResult->size())
+    return false;
+  for (unsigned I = 0; I < SrcResult->size(); ++I) {
+    const SCEV *SrcStep = (*SrcResult)[I]->getStepRecurrence(*SE);
+    const SCEV *DstStep = (*DstResult)[I]->getStepRecurrence(*SE);
+    if (SrcStep != DstStep)
+      return false;
+  }
+  const SCEV *Zero = SE->getZero(SrcAccessFn->getType());
+  const SCEV *One = SE->getOne(SrcAccessFn->getType());
+  for (unsigned I = 0; I < SrcResult->size(); ++I) {
+    const SCEVAddRecExpr *SrcAR = (*SrcResult)[I];
+    const SCEVAddRecExpr *DstAR = (*DstResult)[I];
+    SrcSubscripts.push_back(SE->getAddRecExpr(Zero, One, SrcAR->getLoop(),
+                                              SrcAR->getNoWrapFlags()));
+    DstSubscripts.push_back(SE->getAddRecExpr(Zero, One, DstAR->getLoop(),
+                                              DstAR->getNoWrapFlags()));
+  }
   return true;
 }
 

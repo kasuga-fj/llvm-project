@@ -528,10 +528,13 @@ static const SCEV *estimateMaxOffsetValueAux(const SCEV *S,
   const SCEV *BTC = SE.getBackedgeTakenCount(AR->getLoop());
   if (!BTC)
     return nullptr;
-  if (ED.isKnownNonNegative(Step))
-    return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
+  if (ED.isKnownNonNegative(Step)) {
+    const SCEVAddRecExpr *NewAR = cast<SCEVAddRecExpr>(
+        SE.getAddRecExpr(Start, Step, AR->getLoop(), AR->getNoWrapFlags()));
+    return NewAR->evaluateAtIteration(BTC, SE);
+  }
   if (ED.isKnownNonPositive(Step))
-    return SE.getAddExpr(Start, SE.getMulExpr(BTC, Step));
+    return Start;
   return nullptr;
 }
 

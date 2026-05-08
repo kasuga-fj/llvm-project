@@ -2433,7 +2433,7 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
            << "Computed dependence info, invoking the transform.";
   });
 
-  DependenceInfo DI(&F, &AR.AA, &AR.SE, &AR.LI);
+  DependenceInfo DI(&F, &AR.AA, &AR.SE, &AR.LI, &AR.DT);
   if (!LoopInterchange(&AR.SE, &AR.LI, &DI, &AR.DT, &AR, &ORE).run(LN))
     return PreservedAnalyses::all();
   U.markLoopNestChanged(true);

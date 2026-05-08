@@ -40,6 +40,7 @@
 #define LLVM_ANALYSIS_DEPENDENCEANALYSIS_H
 
 #include "llvm/ADT/SmallBitVector.h"
+#include "llvm/Analysis/ExecutionDomain.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
@@ -309,8 +310,12 @@ private:
 /// DependenceInfo - This class is the main dependence-analysis driver.
 class DependenceInfo {
 public:
-  DependenceInfo(Function *F, AAResults *AA, ScalarEvolution *SE, LoopInfo *LI)
-      : AA(AA), SE(SE), LI(LI), F(F) {}
+  DependenceInfo(Function *F, AAResults *AA, ScalarEvolution *SE, LoopInfo *LI,
+                 DominatorTree *DT = nullptr)
+      : AA(AA), SE(SE), LI(LI), F(F), ED(*SE) {
+    if (DT)
+      ED.run(*F, *LI, *DT);
+  }
 
   /// Handle transitive invalidation when the cached analysis results go away.
   LLVM_ABI bool invalidate(Function &F, const PreservedAnalyses &PA,
@@ -334,6 +339,7 @@ private:
   ScalarEvolution *SE;
   LoopInfo *LI;
   Function *F;
+  ExecutionDomain ED;
 
   /// Subscript - This private struct represents a pair of subscripts from
   /// a pair of potentially multi-dimensional array references. We use a
@@ -707,6 +713,10 @@ private:
                                const SCEV *SrcAccessFn, const SCEV *DstAccessFn,
                                SmallVectorImpl<const SCEV *> &SrcSubscripts,
                                SmallVectorImpl<const SCEV *> &DstSubscripts);
+
+  bool tryPseudoDelinearize(const SCEV *SrcAccessFn, const SCEV *DstAccessFn,
+                            SmallVectorImpl<const SCEV *> &SrcSubscripts,
+                            SmallVectorImpl<const SCEV *> &DstSubscripts);
 
   /// checkSubscript - Helper function for checkSrcSubscript and
   /// checkDstSubscript to avoid duplicate code
