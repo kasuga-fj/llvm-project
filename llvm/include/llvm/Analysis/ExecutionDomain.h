@@ -104,6 +104,10 @@ struct ExecutionDomain {
   bool isKnownNonPositive(const SCEV *S);
   bool isKnownPredicate(ICmpInst::Predicate Pred, const SCEV *LHS, const SCEV *RHS);
 
+  bool isKnownAddNoSignedWrap(const SCEV *LHS, const SCEV *RHS);
+  bool isKnownSubNoSignedWrap(const SCEV *LHS, const SCEV *RHS);
+  bool isKnownMulNoSignedWrap(const SCEV *LHS, const SCEV *RHS);
+
 private:
   ScalarEvolution &SE;
   DenseMap<const SCEV *, DenseMap<ICmpInst::Predicate, InequalityType>> Contexts;

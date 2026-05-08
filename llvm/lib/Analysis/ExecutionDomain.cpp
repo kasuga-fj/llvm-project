@@ -810,9 +810,48 @@ bool ExecutionDomain::isAddRecNoSignedWrap(const SCEVAddRecExpr *AR) {
   ConstantRange StepRange = SE.getSignedRange(Step);
   ConstantRange BTCRange = SE.getSignedRange(BTC);
   ConstantRange Mul = StepRange.smul_fast(BTCRange);
-  if (Mul.isFullSet())
+  if (Mul.isFullSet() || Mul.isSignWrappedSet())
     return false;
   return Mul.signedAddMayOverflow(StartRange) == ConstantRange::OverflowResult::NeverOverflows;
+}
+
+bool ExecutionDomain::isKnownAddNoSignedWrap(const SCEV *LHS, const SCEV *RHS) {
+  ConstantRange LHSRange = SE.getSignedRange(rewrite(LHS));
+  ConstantRange RHSRange = SE.getSignedRange(rewrite(RHS));
+  if (LHSRange.isFullSet() || LHSRange.isSignWrappedSet() ||
+      RHSRange.isFullSet() || RHSRange.isSignWrappedSet())
+    return false;
+  if (LHSRange.signedAddMayOverflow(RHSRange) ==
+      ConstantRange::OverflowResult::NeverOverflows)
+    return true;
+  return SE.willNotOverflow(Instruction::Add, /*Signed=*/true, rewrite(LHS),
+                            rewrite(RHS));
+}
+
+bool ExecutionDomain::isKnownSubNoSignedWrap(const SCEV *LHS, const SCEV *RHS) {
+  ConstantRange LHSRange = SE.getSignedRange(rewrite(LHS));
+  ConstantRange RHSRange = SE.getSignedRange(rewrite(RHS));
+  if (LHSRange.isFullSet() || LHSRange.isSignWrappedSet() ||
+      RHSRange.isFullSet() || RHSRange.isSignWrappedSet())
+    return false;
+  if (LHSRange.signedSubMayOverflow(RHSRange) ==
+      ConstantRange::OverflowResult::NeverOverflows)
+    return true;
+  return SE.willNotOverflow(Instruction::Sub, /*Signed=*/true, rewrite(LHS),
+                            rewrite(RHS));
+}
+
+bool ExecutionDomain::isKnownMulNoSignedWrap(const SCEV *LHS, const SCEV *RHS) {
+  ConstantRange LHSRange = SE.getSignedRange(rewrite(LHS));
+  ConstantRange RHSRange = SE.getSignedRange(rewrite(RHS));
+  if (LHSRange.isFullSet() || LHSRange.isSignWrappedSet() ||
+      RHSRange.isFullSet() || RHSRange.isSignWrappedSet())
+    return false;
+  ConstantRange Mul = LHSRange.smul_fast(RHSRange);
+  if (!Mul.isFullSet() && !Mul.isSignWrappedSet())
+    return true;
+  return SE.willNotOverflow(Instruction::Mul, /*Signed=*/true, rewrite(LHS),
+                            rewrite(RHS));
 }
 
 bool ExecutionDomain::isKnownPositive(const SCEV *S) {

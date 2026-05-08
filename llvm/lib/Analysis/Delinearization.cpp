@@ -869,16 +869,12 @@ bool llvm::validatePseudoDelinearizationResult(
     if (!ED.isKnownNonNegative(AR)) {
       return false;
     }
-#if 0
-    if (!ED.isKnownPredicate(ICmpInst::ICMP_SLT, Acc, Stride)) {
-      //return false;
-    }
-#else
+    if (!ED.isKnownSubNoSignedWrap(Stride, Acc))
+      return false;
     const SCEV *Diff = SE.getMinusSCEV(Stride, Acc);
     if (!ED.isKnownPositive(Diff)) {
       return false;
     }
-#endif
     const SCEV *Add = [&]() -> const SCEV * {
       const SCEV *Step = AR->getStepRecurrence(SE);
       if (!ED.isAddRecNoSignedWrap(AR))
@@ -892,7 +888,8 @@ bool llvm::validatePseudoDelinearizationResult(
       return AR;
     }();
 
-    // TODO: Add may overflow.
+    if (!ED.isKnownAddNoSignedWrap(Acc, Add))
+      return false;
     Acc = SE.getAddExpr(Acc, Add);
   }
   return true;
