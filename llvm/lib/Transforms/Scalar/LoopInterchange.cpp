@@ -685,9 +685,35 @@ struct LoopInterchange {
   }
 
   unsigned selectLoopForInterchange(ArrayRef<Loop *> LoopList) {
-    // TODO: Add a better heuristic to select the loop to be interchanged based
-    // on the dependence matrix. Currently we select the innermost loop.
-    return LoopList.size() - 1;
+    unsigned Res = LoopList.size();
+    Loop *OutermostLoop = LoopList.front();
+    for (BasicBlock *BB : OutermostLoop->blocks()) {
+      for (Instruction &I : *BB) {
+        // Loads and stores are checked separately, so we can skip them here.
+        if (isa<LoadInst, StoreInst, PseudoProbeInst>(&I))
+          continue;
+
+        // We cannot ignore potential memory reads, e.g., loads inside the
+        // called function.
+        if (!I.mayHaveSideEffects() && !I.mayReadFromMemory())
+          continue;
+
+        LLVM_DEBUG(dbgs() << "Loops contain instructions that cannot be safely "
+                             "interchanged\n");
+        ORE->emit([&]() {
+          return OptimizationRemarkMissed(DEBUG_TYPE, "UnsafeInst",
+                                          I.getDebugLoc(), I.getParent())
+                 << "Cannot interchange loops due to instruction that is "
+                    "potentially unsafe to interchange.";
+        });
+
+        Loop *L = LI->getLoopFor(BB);
+        Res = std::min(Res, L->getLoopDepth() + 1);
+        if (Res == 1)
+          return Res;
+      }
+    }
+    return Res;
   }
 
   bool processLoopList(SmallVectorImpl<Loop *> &LoopList) {
@@ -708,6 +734,9 @@ struct LoopInterchange {
       }
     });
 
+    unsigned NumLoops = selectLoopForInterchange(LoopList);
+    if (NumLoops <= 1)
+      return false;
     CharMatrix DependencyMatrix;
     Loop *OuterMostLoop = *(LoopList.begin());
     if (!populateDependencyMatrix(DependencyMatrix, LoopNestDepth,
@@ -727,15 +756,14 @@ struct LoopInterchange {
       return false;
     }
 
-    unsigned SelecLoopId = selectLoopForInterchange(LoopList);
     CacheCostManager CCM(LoopList[0], AR, DI);
     // We try to achieve the globally optimal memory access for the loopnest,
     // and do interchange based on a bubble-sort fasion. We start from
     // the innermost loop, move it outwards to the best possible position
     // and repeat this process.
-    for (unsigned j = SelecLoopId; j > 0; j--) {
+    for (unsigned j = NumLoops; j >= 2; j--) {
       bool ChangedPerIter = false;
-      for (unsigned i = SelecLoopId; i > SelecLoopId - j; i--) {
+      for (unsigned i = NumLoops - 1; i >= NumLoops - j + 1; i--) {
         bool Interchanged =
             processLoop(LoopList, i, i - 1, DependencyMatrix, CCM);
         ChangedPerIter |= Interchanged;
@@ -1486,30 +1514,6 @@ bool LoopInterchangeLegality::canInterchangeLoops(unsigned InnerLoopId,
     });
     return false;
   }
-  // Check if outer and inner loop contain legal instructions only.
-  for (auto *BB : OuterLoop->blocks())
-    for (Instruction &I : *BB) {
-      // Loads and stores are checked separately, so we can skip them here.
-      if (isa<LoadInst, StoreInst, PseudoProbeInst>(&I))
-        continue;
-
-      // We cannot ignore potential memory reads, e.g., loads inside the called
-      // function.
-      if (!I.mayHaveSideEffects() && !I.mayReadFromMemory())
-        continue;
-
-      LLVM_DEBUG(
-          dbgs()
-          << "Loops contain instructions that cannot be safely interchanged\n");
-      ORE->emit([&]() {
-        return OptimizationRemarkMissed(DEBUG_TYPE, "UnsafeInst",
-                                        I.getDebugLoc(), I.getParent())
-               << "Cannot interchange loops due to instruction that is "
-                  "potentially unsafe to interchange.";
-      });
-
-      return false;
-    }
 
   if (!findInductions(InnerLoop, InnerLoopInductions)) {
     LLVM_DEBUG(dbgs() << "Could not find inner loop induction variables.\n");
