@@ -1708,7 +1708,7 @@ bool DependenceInfo::testSIV(const SCEV *Src, const SCEV *Dst, unsigned &Level,
                                 UnderRuntimeAssumptions);
     else if (SrcCoeff == SE->getNegativeSCEV(DstCoeff))
       disproven = weakCrossingSIVtest(SrcAddRec, DstAddRec, Level, Result);
-    return disproven || exactSIVtest(SrcAddRec, DstAddRec, Level, Result);
+    return disproven; // || exactSIVtest(SrcAddRec, DstAddRec, Level, Result);
   }
   if (SrcAddRec) {
     const Loop *CurSrcLoop = SrcAddRec->getLoop();
