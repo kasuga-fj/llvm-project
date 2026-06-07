@@ -400,6 +400,12 @@ void llvm::computeAccessFunctions(ScalarEvolution &SE, const SCEV *Expr,
   Subscripts.push_back(Res);
 
   std::reverse(Subscripts.begin(), Subscripts.end());
+  for (const SCEV *Subscript : Subscripts) {
+    IntegerType *IntTy = cast<IntegerType>(Subscript->getType());
+    IntegerType *WideTy =
+        IntegerType::get(IntTy->getContext(), IntTy->getBitWidth() * 2);
+    SE.getSignExtendExpr(Subscript, WideTy);
+  }
 
   LLVM_DEBUG({
     dbgs() << "Subscripts:\n";
