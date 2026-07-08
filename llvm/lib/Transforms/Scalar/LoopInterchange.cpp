@@ -166,6 +166,67 @@ static bool inThisOrder(const Instruction *Src, const Instruction *Dst) {
 }
 #endif
 
+static void
+enumerateDirectionVectorsAux(const Dependence *D, unsigned Level,
+                             std::vector<char> &Dep,
+                             SmallVector<std::vector<char>, 4> &Vecs) {
+  if (Level == D->getLevels()) {
+    Vecs.push_back(Dep);
+    return;
+  }
+
+  SmallVector<char, 3> Dirs;
+  unsigned Dir = D->getDirection(Level);
+  if (Dir & Dependence::DVEntry::LT)
+    Dirs.push_back('<');
+  if (Dir & Dependence::DVEntry::EQ)
+    Dirs.push_back('=');
+  if (Dir & Dependence::DVEntry::GT)
+    Dirs.push_back('>');
+  for (char Dir : Dirs) {
+    Dep.push_back(Dir);
+    enumerateDirectionVectorsAux(D, Level + 1, Dep, Vecs);
+    Dep.pop_back();
+  }
+}
+
+/// Expand '*', '<=', and '>='. For example, if \p D is [* <], it will be
+/// expanded to [< <], [= <], and [> <].
+static SmallVector<std::vector<char>, 4>
+enumerateDirectionVectors(const Dependence *D) {
+  std::vector<char> Dep;
+  SmallVector<std::vector<char>, 4> Res;
+  enumerateDirectionVectorsAux(D, 1, Dep, Res);
+  return Res;
+}
+
+/// If the leftmost non-'=' direction is '>', negate the direction vector to
+/// make it non-negative. Return true if the direction vector is negated,
+/// otherwise false. Precondition: \p Dep contains only '<', '=', and '>'
+/// characters.
+static bool normalizeDirectionVector(MutableArrayRef<char> Dep) {
+  bool ToNegate = false;
+  for (char C : Dep) {
+    if (C == '<')
+      break;
+    if (C == '=')
+      continue;
+    assert(C == '>' && "Unexpected direction");
+    ToNegate = true;
+    break;
+  }
+
+  if (ToNegate)
+    for (char &C : Dep) {
+      if (C == '<')
+        C = '>';
+      else if (C == '>')
+        C = '<';
+    }
+
+  return ToNegate;
+}
+
 static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
                                      Loop *L, DependenceInfo *DI,
                                      ScalarEvolution *SE,
@@ -230,99 +291,72 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
         assert(D->isOrdered() && "Expected an output, flow or anti dep.");
         // If the direction vector is negative, normalize it to
         // make it non-negative.
-        if (D->normalize(SE))
-          LLVM_DEBUG(dbgs() << "Negative dependence vector normalized.\n");
-        LLVM_DEBUG(StringRef DepType =
-                       D->isFlow() ? "flow" : D->isAnti() ? "anti" : "output";
-                   dbgs() << "Found " << DepType
-                          << " dependency between Src and Dst\n"
-                          << " Src:" << *Src << "\n Dst:" << *Dst << '\n');
         unsigned Levels = D->getLevels();
-        char Direction;
-        for (unsigned II = 1; II <= Levels; ++II) {
-          // `DVEntry::LE` is converted to `*`. This is because `LE` means `<`
-          // or `=`, for which we don't have an equivalent representation, so
-          // that the conservative approximation is necessary. The same goes for
-          // `DVEntry::GE`.
-          // TODO: Use of fine-grained expressions allows for more accurate
-          // analysis.
-          unsigned Dir = D->getDirection(II);
-          if (Dir == Dependence::DVEntry::LT)
-            Direction = '<';
-          else if (Dir == Dependence::DVEntry::GT)
-            Direction = '>';
-          else if (Dir == Dependence::DVEntry::EQ)
-            Direction = '=';
-          else
-            Direction = '*';
-          Dep.push_back(Direction);
-        }
-
-        // If the Dependence object doesn't have any information, fill the
-        // dependency vector with '*'.
-        if (D->isConfused()) {
-          assert(Dep.empty() && "Expected empty dependency vector");
-          Dep.assign(Level, '*');
-        }
-
-        while (Dep.size() != Level) {
-          Dep.push_back('I');
-        }
-
-        // If all the elements of any direction vector have only '*', legality
-        // can't be proven. Exit early to save compile time.
-        if (all_of(Dep, equal_to('*'))) {
-          ORE->emit([&]() {
-            return OptimizationRemarkMissed(DEBUG_TYPE, "Dependence",
-                                            L->getStartLoc(), L->getHeader())
-                   << "All loops have dependencies in all directions.";
-          });
+        bool BailOut = [&] {
+          if (D->isConfused())
+            return true;
+          if (Levels < Level)
+            return false;
+          for (unsigned II = 1; II <= Levels; ++II)
+            if (D->getDirection(II) != Dependence::DVEntry::ALL)
+              return false;
+          return true;
+        }();
+        if (BailOut)
           return false;
-        }
 
-        // Test whether the dependency is forward or not.
-        bool IsKnownForward = true;
-        if (Src->getParent() != Dst->getParent()) {
-          // In general, when Src and Dst are in different BBs, the execution
-          // order of them within a single iteration is not guaranteed. Treat
-          // conservatively as not-forward dependency in this case.
-          IsKnownForward = false;
-        } else {
-          // Src and Dst are in the same BB. If they are the different
-          // instructions, Src should appear before Dst in the BB as they are
-          // stored to MemInstr in that order.
-          assert((Src == Dst || inThisOrder(Src, Dst)) &&
-                 "Unexpected instructions");
+        SmallVector<std::vector<char>, 4> DirectionVectors =
+            enumerateDirectionVectors(&*D);
+        for (std::vector<char> &Dep : DirectionVectors) {
+          normalizeDirectionVector(Dep);
 
-          // If the Dependence object is reversed (due to normalization), it
-          // represents the dependency from Dst to Src, meaning it is a backward
-          // dependency. Otherwise it should be a forward dependency.
-          bool IsReversed = D->getSrc() != Src;
-          if (IsReversed)
+          while (Dep.size() != Level)
+            Dep.push_back('I');
+
+          // Test whether the dependency is forward or not.
+          bool IsKnownForward = true;
+          if (Src->getParent() != Dst->getParent()) {
+            // In general, when Src and Dst are in different BBs, the execution
+            // order of them within a single iteration is not guaranteed. Treat
+            // conservatively as not-forward dependency in this case.
             IsKnownForward = false;
+          } else {
+            // Src and Dst are in the same BB. If they are the different
+            // instructions, Src should appear before Dst in the BB as they are
+            // stored to MemInstr in that order.
+            assert((Src == Dst || inThisOrder(Src, Dst)) &&
+                   "Unexpected instructions");
+
+            // If the Dependence object is reversed (due to normalization), it
+            // represents the dependency from Dst to Src, meaning it is a
+            // backward dependency. Otherwise it should be a forward dependency.
+            bool IsReversed = D->getSrc() != Src;
+            if (IsReversed)
+              IsKnownForward = false;
+          }
+
+          // Initialize the last element. Assume forward dependencies only; it
+          // will be updated later if there is any non-forward dependency.
+          Dep.push_back('<');
+
+          // The last element should express the "summary" among one or more
+          // direction vectors whose first N elements are the same (where N is
+          // the depth of the loop nest). Hence we exclude the last element from
+          // the Seen map.
+          auto [Ite, Inserted] = Seen.try_emplace(
+              StringRef(Dep.data(), Dep.size() - 1), DepMatrix.size());
+
+          // Make sure we only add unique entries to the dependency matrix.
+          if (Inserted)
+            DepMatrix.push_back(Dep);
+
+          // If we cannot prove that this dependency is forward, change the last
+          // element of the corresponding entry. Since a `[... *]` dependency
+          // includes a `[... <]` dependency, we do not need to keep both and
+          // change the existing entry instead.
+          if (!IsKnownForward)
+            DepMatrix[Ite->second].back() = '*';
         }
-
-        // Initialize the last element. Assume forward dependencies only; it
-        // will be updated later if there is any non-forward dependency.
-        Dep.push_back('<');
-
-        // The last element should express the "summary" among one or more
-        // direction vectors whose first N elements are the same (where N is
-        // the depth of the loop nest). Hence we exclude the last element from
-        // the Seen map.
-        auto [Ite, Inserted] = Seen.try_emplace(
-            StringRef(Dep.data(), Dep.size() - 1), DepMatrix.size());
-
-        // Make sure we only add unique entries to the dependency matrix.
-        if (Inserted)
-          DepMatrix.push_back(Dep);
-
-        // If we cannot prove that this dependency is forward, change the last
-        // element of the corresponding entry. Since a `[... *]` dependency
-        // includes a `[... <]` dependency, we do not need to keep both and
-        // change the existing entry instead.
-        if (!IsKnownForward)
-          DepMatrix[Ite->second].back() = '*';
       }
     }
   }
